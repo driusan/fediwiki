@@ -2,12 +2,15 @@ package main
 
 import (
 	"crypto"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"path/filepath"
 
@@ -74,9 +77,13 @@ func (db *FileSystemDB) GetPage(pagename string) (*Page, error) {
 		return nil, fmt.Errorf("No page name")
 	}
 	filesdir := filepath.Join(db.FSRoot, "pages", pagename)
-    if !strings.HasPrefix(filesdir, db.FSRoot + "/pages") {
+	if !strings.HasPrefix(filesdir, db.FSRoot+"/pages") {
 		return nil, fmt.Errorf("Invalid page name")
-    }
+	}
+	latest, err := os.ReadFile(filepath.Join(filesdir, "latest"))
+	if err == nil {
+		filesdir = filepath.Join(filesdir, "history", string(latest))
+	}
 	if _, err := os.Stat(filepath.Join(filesdir, "content.md")); errors.Is(err, os.ErrNotExist) {
 		return nil, NotFound
 	}
@@ -87,49 +94,113 @@ func (db *FileSystemDB) GetPage(pagename string) (*Page, error) {
 	p.Content = string(content)
 
 	if _, err := os.Stat(filepath.Join(filesdir, "title.txt")); err == nil {
-        content, err := os.ReadFile(filepath.Join(filesdir, "title.txt"))
-        if err != nil {
-            return nil, err
-        }
-        p.Title = string(content)
+		content, err := os.ReadFile(filepath.Join(filesdir, "title.txt"))
+		if err != nil {
+			return nil, err
+		}
+		p.Title = string(content)
 	}
 	if _, err := os.Stat(filepath.Join(filesdir, "summary.md")); err == nil {
-        content, err := os.ReadFile(filepath.Join(filesdir, "summary.md"))
-        if err != nil {
-            return nil, err
-        }
-        p.Summary = string(content)
+		content, err := os.ReadFile(filepath.Join(filesdir, "summary.md"))
+		if err != nil {
+			return nil, err
+		}
+		p.Summary = string(content)
 	}
 
 	return &p, nil
 }
-func (db *FileSystemDB) SavePage(p Page) error {
+func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*Page, error) {
+	var p Page
+	if pagename == "" {
+		return nil, fmt.Errorf("No page name")
+	}
+	filesdir := filepath.Join(db.FSRoot, "pages", pagename, "history", revision)
+	if !strings.HasPrefix(filesdir, db.FSRoot+"/pages") {
+		return nil, fmt.Errorf("Invalid page name")
+	}
+	if _, err := os.Stat(filepath.Join(filesdir, "content.md")); errors.Is(err, os.ErrNotExist) {
+		return nil, NotFound
+	}
+	content, err := os.ReadFile(filepath.Join(filesdir, "content.md"))
+	if err != nil {
+		return nil, err
+	}
+	p.Content = string(content)
+
+	if _, err := os.Stat(filepath.Join(filesdir, "title.txt")); err == nil {
+		content, err := os.ReadFile(filepath.Join(filesdir, "title.txt"))
+		if err != nil {
+			return nil, err
+		}
+		p.Title = string(content)
+	}
+	if _, err := os.Stat(filepath.Join(filesdir, "summary.md")); err == nil {
+		content, err := os.ReadFile(filepath.Join(filesdir, "summary.md"))
+		if err != nil {
+			return nil, err
+		}
+		p.Summary = string(content)
+	}
+
+	return &p, nil
+}
+func (db *FileSystemDB) SavePage(p Page, editor string) error {
 	if p.PageName == "" {
 		return fmt.Errorf("No page name")
 	}
-	dir := db.FSRoot + "/pages/" + p.PageName
-	if err := os.MkdirAll(dir, 0777); err != nil {
+	basedir := filepath.Join(db.FSRoot, "pages", p.PageName)
+
+	var idrand [36]byte
+	if _, err := rand.Read(idrand[:]); err != nil {
 		return err
 	}
+	savedir := filepath.Join(basedir, "history", base64.URLEncoding.EncodeToString(idrand[:]))
 
+	if err := os.MkdirAll(savedir, 0777); err != nil {
+		return err
+	}
 	content := string(p.Content)
 	content = strings.Replace(content, "\r\n", "\n", -1)
 	content = strings.Replace(content, "\n\r", "\n", -1)
 	content = strings.Replace(content, "\r", "\n", -1)
-	if err := os.WriteFile(dir+"/content.md", []byte(content), 0664); err != nil {
-        return err
-    }
+	if err := os.WriteFile(savedir+"/content.md", []byte(content), 0664); err != nil {
+		return err
+	}
 	content = string(p.Summary)
 	content = strings.Replace(content, "\r\n", "\n", -1)
 	content = strings.Replace(content, "\n\r", "\n", -1)
 	content = strings.Replace(content, "\r", "\n", -1)
-	if err := os.WriteFile(dir+"/summary.md", []byte(content), 0664); err != nil {
-        return err
-    }
-	if err := os.WriteFile(dir+"/title.txt", []byte(p.Title), 0664); err != nil {
-        return err
-    }
-    return nil
+	if err := os.WriteFile(savedir+"/summary.md", []byte(content), 0664); err != nil {
+		return err
+	}
+	if err := os.WriteFile(savedir+"/title.txt", []byte(p.Title), 0664); err != nil {
+		return err
+	}
+	var parentstring string
+	if bytes, err := os.ReadFile(filepath.Join(basedir, "latest")); err == nil {
+		parentstring = string(bytes)
+		if err := os.WriteFile(filepath.Join(savedir, "parentversion"), bytes, 0664); err != nil {
+			return err
+		}
+	}
+
+	f, err := os.OpenFile(filepath.Join(basedir, "revisions.db"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if parentstring != "" {
+		fmt.Fprintf(f, "id=%s time=%s editor=%s parent=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), time.Now().Format(time.RFC3339), editor, parentstring, p.PageName)
+	} else {
+		fmt.Fprintf(f, "id=%s time=%s editor=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), time.Now().Format(time.RFC3339), editor, p.PageName)
+	}
+
+	if err := os.WriteFile(basedir+"/latest", []byte(base64.URLEncoding.EncodeToString(idrand[:])), 0664); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (db *FileSystemDB) GetClient(hostname string) (OAuthClient, error) {
@@ -168,7 +239,7 @@ func (db *FileSystemDB) GetClient(hostname string) (OAuthClient, error) {
 
 func (db *FileSystemDB) StoreClient(hostname string, c OAuthClient) error {
 	if _, err := db.GetClient(hostname); err == nil {
-		return fmt.Errorf("%s already registered")
+		return fmt.Errorf("%s already registered", hostname)
 	}
 	filename := db.FSRoot + "/oauthclients.db"
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
@@ -231,4 +302,35 @@ func (db *FileSystemDB) DestroySession(s *session.Session) error {
 		return fmt.Errorf("Invalid session ID")
 	}
 	return os.RemoveAll(dir)
+}
+func (db *FileSystemDB) GetPageRevisions(pagename string) ([]Revision, error) {
+	pagesdb, err := ndb.Open(filepath.Join(db.FSRoot, "pages", pagename, "revisions.db"))
+	if err != nil {
+		return nil, err
+	}
+	var result []Revision = nil
+
+	pages := pagesdb.Search("pagename", pagename)
+	for _, rowtuple := range pages {
+		var rev Revision
+		for _, tuple := range rowtuple {
+			switch tuple.Attr {
+			case "id":
+				rev.RevisionID = tuple.Val
+			case "time":
+				if t, err := time.Parse(time.RFC3339, tuple.Val); err != nil {
+					log.Println(err)
+				} else {
+					rev.EditTime = &t
+				}
+			case "editor":
+				rev.Editor = tuple.Val
+			case "pagename":
+				rev.PageName = tuple.Val
+			}
+
+		}
+		result = append(result, rev)
+	}
+	return result, nil
 }

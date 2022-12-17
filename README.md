@@ -9,11 +9,11 @@ Done:
 - [x] Login with OAuth
 - [x] Create new pages when logged in
 - [x] Update pages when logged in
+- [x] Page history
 
 TODO:
 - [ ] Create page actors that can be followed
 - [ ] Send out a note with the diff when a page edit is proposed (to owner) or accepted (to followers) 
-- [ ] Record history of edits somewhere
 - [ ] Require approval of edits from page owner or admin
 - [ ] Federate the Article content to followers. Send an Update activity for the article to followers when a page change is accepted.
 - [ ] Implement page owner and admin

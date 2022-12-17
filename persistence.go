@@ -1,6 +1,9 @@
 package main
 
-import "crypto"
+import (
+	"crypto"
+	"time"
+)
 
 type OAuthClient struct {
 	Id           string `json:"id"`
@@ -27,7 +30,17 @@ type Page struct {
 	Summary  string
 	Content  string
 }
+
+type Revision struct {
+	PageName   string
+	RevisionID string
+	Editor     string
+	EditTime   *time.Time
+}
+
 type PagePersister interface {
 	GetPage(pagename string) (*Page, error)
-	SavePage(page Page) error
+	SavePage(page Page, editor string) error
+	GetPageRevisions(pagename string) ([]Revision, error)
+	GetPageRevision(pagename, revisionid string) (*Page, error)
 }
