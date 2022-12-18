@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -32,6 +34,10 @@ type PageTemplateData struct {
 	Content template.HTML
 }
 
+func internalError(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(500)
+	io.WriteString(w, "Internal Server error\n")
+}
 func notFound(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(404)
 	io.WriteString(w, "Not found\n")
@@ -43,12 +49,14 @@ func notImplemented(w http.ResponseWriter, r *http.Request) {
 }
 
 func getHeader(s *session.Session, pagename string) template.HTML {
-	if user := s.Get("OAuthAuthenticatedUsername"); user != "" {
-		var b bytes.Buffer
-		if err := loggedInHeader.Execute(&b, struct{ PageName, Username string }{pagename, user}); err != nil {
-			panic(err)
+	if s != nil {
+		if user := s.Get("OAuthAuthenticatedUsername"); user != "" {
+			var b bytes.Buffer
+			if err := loggedInHeader.Execute(&b, struct{ PageName, Username string }{pagename, user}); err != nil {
+				panic(err)
+			}
+			return template.HTML(b.Bytes())
 		}
-		return template.HTML(b.Bytes())
 	}
 	var b bytes.Buffer
 	if err := loginTemplate.Execute(&b, struct{ PageName string }{pagename}); err != nil {
@@ -57,7 +65,7 @@ func getHeader(s *session.Session, pagename string) template.HTML {
 	return template.HTML(b.Bytes())
 }
 
-func createPage(session *session.Session, page string, db PagePersister, w http.ResponseWriter, r *http.Request) {
+func createPage(session *session.Session, page string, adb ActorPersister, db PagePersister, w http.ResponseWriter, r *http.Request) {
 	var b bytes.Buffer
 	if err := editTemplate.Execute(&b, Page{}); err != nil {
 		w.WriteHeader(500)
@@ -150,13 +158,13 @@ func wikipagerev(session *session.Session, pagename, rev string, db PagePersiste
 		io.WriteString(w, "Invalid method")
 	}
 }
-func wikipage(session *session.Session, pagename string, db PagePersister, w http.ResponseWriter, r *http.Request) {
+func wikipage(session *session.Session, pagename string, adb ActorPersister, db PagePersister, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		page, err := db.GetPage(pagename)
 		if err != nil {
 			w.WriteHeader(404)
-			createPage(session, pagename, db, w, r)
+			createPage(session, pagename, adb, db, w, r)
 			return
 		}
 		if r.URL.Query().Get("edit") == "true" {
@@ -206,7 +214,25 @@ func wikipage(session *session.Session, pagename string, db PagePersister, w htt
 			Summary:  r.Form.Get("summary"),
 			Content:  r.Form.Get("content"),
 		}
-		if err := db.SavePage(page, session.Get("OAuthAuthenticatedUsername")); err != nil {
+		pageactor, err := adb.GetPageActor(pagename)
+		if err == NotFound {
+			key, err := rsa.GenerateKey(rand.Reader, 4096)
+			if err != nil {
+				log.Println(err)
+				w.WriteHeader(500)
+				io.WriteString(w, "Internal server error")
+				return
+			}
+			a2, err := adb.NewPageActor(page, r.Host, key, &key.PublicKey)
+			if err != nil {
+				log.Println(err)
+				w.WriteHeader(500)
+				io.WriteString(w, "Internal server error")
+				return
+			}
+			pageactor = a2
+		}
+		if err := db.SavePage(page, *pageactor, session.Get("OAuthAuthenticatedUsername")); err != nil {
 			log.Println(err)
 			w.WriteHeader(500)
 			io.WriteString(w, "Internal server error")
@@ -232,34 +258,48 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 		urlPieces := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
 		switch len(urlPieces) {
 		case 0:
-			wikipage(sess, frontPage, pagedb, w, r)
+			wikipage(sess, frontPage, actordb, pagedb, w, r)
 			return
 		case 1:
 			if urlPieces[0] == "" {
-				wikipage(sess, frontPage, pagedb, w, r)
+				wikipage(sess, frontPage, actordb, pagedb, w, r)
 				return
 			}
-			wikipage(sess, urlPieces[0], pagedb, w, r)
+			wikipage(sess, urlPieces[0], actordb, pagedb, w, r)
 			return
 		case 2:
 			switch urlPieces[1] {
-			case "id":
+			case "actor":
 				act, err := actordb.GetPageActor(urlPieces[0])
 				if err != nil {
+					log.Println(err)
 					// FIXME: Be smarter about error
 					notImplemented(w, r)
 					return
 				}
 				val, err := json.Marshal(act)
 				if err != nil {
+					log.Println(err)
 					// FIXME: Be smarter about error
 					notImplemented(w, r)
 					return
 				}
+				w.Header().Set("Content-Type", "application/activity+json")
 				w.Write(val)
 				return
 			case "inbox":
-				notImplemented(w, r)
+				_, err := actordb.GetPageActor(urlPieces[0])
+
+                if err != nil {
+                    if err == NotFound {
+                        notFound(w, r)
+                    } else {
+                        log.Println(w, r)
+                        internalError(w, r)
+                    }
+                    return
+                }
+                notImplemented(w, r)
 				return
 			case "outbox":
 				notImplemented(w, r)
@@ -420,7 +460,16 @@ func main() {
             </nav>
         </header>
     `))
-	db := FileSystemDB{"/home/driusan/testwiki"}
+	var db FileSystemDB
+	if root := os.Getenv("fediwikiroot"); root != "" {
+		db.FSRoot = root
+	} else {
+		log.Fatal("Missing fediwikiroot")
+	}
+	if domain := os.Getenv("fediwikidomain"); domain == "" {
+		log.Fatal("Missing fediwikidomain")
+	}
+	http.HandleFunc("/.well-known/webfinger", webFingerHandler(&db))
 	http.HandleFunc(pagesRoot, rootPage(&db, &db, &db, pagesRoot))
 	http.HandleFunc("/login/", loginHandler(&db, &db))
 	http.HandleFunc("/logout", logoutHandler(&db))

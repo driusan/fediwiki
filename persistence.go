@@ -21,7 +21,7 @@ type OAuthClientStore interface {
 
 type ActorPersister interface {
 	GetPageActor(page string) (*Profile, error)
-	SavePageActor(page, domain string, key crypto.PublicKey) error
+	NewPageActor(page Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*Profile, error)
 }
 
 type Page struct {
@@ -40,7 +40,7 @@ type Revision struct {
 
 type PagePersister interface {
 	GetPage(pagename string) (*Page, error)
-	SavePage(page Page, editor string) error
+	SavePage(page Page, pageactor Profile, editor string) error
 	GetPageRevisions(pagename string) ([]Revision, error)
 	GetPageRevision(pagename, revisionid string) (*Page, error)
 }

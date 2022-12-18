@@ -3,8 +3,10 @@ package main
 import (
 	"crypto"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -26,7 +28,12 @@ type FileSystemDB struct {
 }
 
 func (db *FileSystemDB) GetPageActor(page string) (*Profile, error) {
-	filename := db.FSRoot + "/" + page + "/actor.json"
+	filename := filepath.Join(db.FSRoot, pagesRoot, page, "actor.json")
+	if !strings.HasPrefix(filename, db.FSRoot+pagesRoot) {
+		// They were trying to use ../.. or something to escape the
+		// filesystem
+		return nil, fmt.Errorf("Invalid page name")
+	}
 	log.Println(filename)
 	if _, err := os.Stat(filename); errors.Is(err, os.ErrNotExist) {
 		return nil, NotFound
@@ -42,33 +49,52 @@ func (db *FileSystemDB) GetPageActor(page string) (*Profile, error) {
 	return &p, nil
 }
 
-func (db *FileSystemDB) SavePageActor(pagename, domain string, k crypto.PublicKey) error {
-	pageurl := "https://" + domain + "/" + pagename
-	id := pageurl + "/id"
-	p := &Profile{
-		Id:       id,
-		Type:     "Service",
-		PageName: pagename,
-		Title:    "test",
-		Summary:  "the front page",
-		Inbox:    pageurl + "/inbox",
-		Outbox:   pageurl + "/outbox",
+func (db *FileSystemDB) NewPageActor(p Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*Profile, error) {
+	pageurl := "https://" + domain + pagesRoot + p.PageName
+	id := pageurl + "/actor"
+	keybytes, err := x509.MarshalPKIXPublicKey(public)
+	if err != nil {
+		return nil, err
+	}
+	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: keybytes})
+	prof := &Profile{
+		Id:                id,
+		Type:              "Service",
+		PreferredUsername: p.PageName,
+		Title:             p.Title,
+		Summary:           p.Summary,
+		Inbox:             pageurl + "/inbox",
+		Outbox:            pageurl + "/outbox",
 		PublicKey: PublicKey{
 			Id:           id + "#main-key",
 			Owner:        id,
-			PublicKeyPem: "FIXME: Add this",
+			PublicKeyPem: string(block),
 		},
 	}
-	filename := db.FSRoot + "/" + pagename + "/actor.json"
+	filedir := filepath.Join(db.FSRoot, pagesRoot, p.PageName)
+	if !strings.HasPrefix(filedir, db.FSRoot+pagesRoot) {
+		// Make sure no ones trying to escape with a ../../ or something
+		return nil, fmt.Errorf("Unknown error creating directory")
+	}
+	if err := os.MkdirAll(filedir, 0775); err != nil {
+		return nil, err
+	}
+
+	filename := filepath.Join(filedir, "actor.json")
+
 	log.Println(filename)
-	bytes, err := json.Marshal(p)
+	bytes, err := json.Marshal(prof)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	privkeybytes, err := x509.MarshalPKIXPublicKey(private)
+	if err := os.WriteFile(filepath.Join(filedir, "private.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privkeybytes}), 0400); err != nil {
+		return nil, err
 	}
 	if err := os.WriteFile(filename, bytes, 0664); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return prof, nil
 }
 
 func (db *FileSystemDB) GetPage(pagename string) (*Page, error) {
@@ -145,7 +171,7 @@ func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*Page, error
 
 	return &p, nil
 }
-func (db *FileSystemDB) SavePage(p Page, editor string) error {
+func (db *FileSystemDB) SavePage(p Page, prof Profile, editor string) error {
 	if p.PageName == "" {
 		return fmt.Errorf("No page name")
 	}
