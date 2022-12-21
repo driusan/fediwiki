@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"fediwiki/pages"
 )
 
-func webFingerHandler(actorsdb ActorPersister) func(w http.ResponseWriter, r *http.Request) {
+func webFingerHandler(actorsdb pages.PagesDatabase) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		resource := r.URL.Query().Get("resource")
 		log.Println("WebFinger for ", resource)

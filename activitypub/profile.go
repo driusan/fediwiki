@@ -11,9 +11,12 @@ type Actor struct {
 	Id                string        `json:"id"`
 	Type              string        `json:"type"`
 	PreferredUsername string        `json:"preferredUsername"`
-	Title             string        `json:"name"`
+	Name              string        `json:"name"`
 	Summary           string        `json:"summary"`
 	Inbox             string        `json:"inbox"`
 	Outbox            string        `json:"outbox"`
+	Following         string        `json:"following,omitempty"`
+	Followers         string        `json:"followers,omitempty"`
+	ProfileIcon       string        `json:"profileicon,omitempty"`
 	PublicKey         PublicKey     `json:"publicKey"`
 }

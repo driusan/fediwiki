@@ -3,15 +3,15 @@ package filesystemdb
 import (
 	"crypto"
 	"crypto/rand"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"path/filepath"
@@ -30,76 +30,6 @@ var BadId error = errors.New("Bad id")
 
 type FileSystemDB struct {
 	FSRoot string
-}
-
-func (db *FileSystemDB) GetPageActor(page string) (*activitypub.Actor, error) {
-	filename := filepath.Join(db.FSRoot, pages.Root, page, "actor.json")
-	if !strings.HasPrefix(filename, db.FSRoot+pages.Root) {
-		// They were trying to use ../.. or something to escape the
-		// filesystem
-		return nil, fmt.Errorf("Invalid page name")
-	}
-	if _, err := os.Stat(filename); errors.Is(err, os.ErrNotExist) {
-		return nil, NotFound
-	}
-	bytes, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, err
-	}
-	var p activitypub.Actor
-	if err := json.Unmarshal(bytes, &p); err != nil {
-		return nil, err
-	}
-	return &p, nil
-}
-
-func (db *FileSystemDB) NewPageActor(p pages.Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*activitypub.Actor, error) {
-	pageurl := "https://" + domain + pages.Root + p.PageName
-	id := pageurl + "/actor"
-	keybytes, err := x509.MarshalPKIXPublicKey(public)
-	if err != nil {
-		return nil, err
-	}
-	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: keybytes})
-	prof := &activitypub.Actor{
-		Context:           activitypub.JSONLDContext{"https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"},
-		Id:                id,
-		Type:              "Service",
-		PreferredUsername: p.PageName,
-		Title:             p.Title,
-		Summary:           p.Summary,
-		Inbox:             pageurl + "/inbox",
-		Outbox:            pageurl + "/outbox",
-		PublicKey: activitypub.PublicKey{
-			Id:           id + "#main-key",
-			Owner:        id,
-			PublicKeyPem: string(block),
-		},
-	}
-	filedir := filepath.Join(db.FSRoot, pages.Root, p.PageName)
-	if !strings.HasPrefix(filedir, db.FSRoot+pages.Root) {
-		// Make sure no ones trying to escape with a ../../ or something
-		return nil, fmt.Errorf("Unknown error creating directory")
-	}
-	if err := os.MkdirAll(filedir, 0775); err != nil {
-		return nil, err
-	}
-
-	filename := filepath.Join(filedir, "actor.json")
-
-	log.Println(filename)
-	bytes, err := json.Marshal(prof)
-	if err != nil {
-		return nil, err
-	}
-	privkeybytes, err := x509.MarshalPKIXPublicKey(private)
-	if err := os.WriteFile(filepath.Join(filedir, "private.pem"), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privkeybytes}), 0400); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filename, bytes, 0664); err != nil {
-		return nil, err
-	}
-	return prof, nil
 }
 
 func (db *FileSystemDB) GetPage(pagename string) (*pages.Page, error) {
@@ -365,16 +295,16 @@ func (db *FileSystemDB) GetPageRevisions(pagename string) ([]pages.Revision, err
 	}
 	return result, nil
 }
-func (d *FileSystemDB) SaveObject(id, type_ string, body []byte) error {
-	if !strings.HasPrefix(id, "https://") {
+func (d *FileSystemDB) SaveObject(obj activitypub.Object) error {
+	if !strings.HasPrefix(obj.Id, "https://") {
 		return BadId
 	}
-	path := base64.URLEncoding.EncodeToString([]byte(id))
+	path := base64.URLEncoding.EncodeToString([]byte(obj.Id))
 
 	if err := os.MkdirAll(filepath.Join(d.FSRoot, "objects", filepath.Dir(path)), 0755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", path), body, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", path), obj.RawBytes, 0644); err != nil {
 		return err
 	}
 
@@ -384,7 +314,7 @@ func (d *FileSystemDB) SaveObject(id, type_ string, body []byte) error {
 	}
 	defer f.Close()
 
-	record := fmt.Sprintf("\nid=%s type=%s cachepath=%s\n", id, type_, path)
+	record := fmt.Sprintf("\nid=%s type=%s cachepath=%s\n", obj.Id, obj.Type, path)
 	if _, err := f.WriteString(record); err != nil {
 		return err
 	}
@@ -447,6 +377,207 @@ func (d *FileSystemDB) SaveKey(keyid, owner string, pembytes []byte) error {
 	}
 	record := fmt.Sprintf("\nkeyid=%s owner=%s cachepath=%s\n", keyid, owner, keyfilename)
 
+	if _, err := f.WriteString(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *FileSystemDB) SendUnprocessedObjects(objstream chan activitypub.Object, wg *sync.WaitGroup) chan string {
+	wg.Add(1)
+	returnstream := make(chan string)
+	go func() {
+		for {
+			id := <-returnstream
+			filename := filepath.Join(d.FSRoot, "objects", "processed.db")
+			f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+			if err != nil {
+				log.Println(err)
+				wg.Done()
+				continue
+			}
+			if _, err := io.WriteString(f, "\nid="+id); err != nil {
+				f.Close()
+				log.Println(err)
+				wg.Done()
+				continue
+			}
+			f.Close()
+			wg.Done()
+		}
+	}()
+
+	ndbdb, err := ndb.Open(filepath.Join(d.FSRoot, "objects", "objects.db"))
+	if err != nil {
+		log.Println(err)
+		return returnstream
+	}
+	processedb, _ := ndb.Open(filepath.Join(d.FSRoot, "objects", "processed.db"))
+	go func() {
+		records := ndbdb.Search("type", "Follow")
+		for _, r := range records {
+			var obj activitypub.Object
+			for _, tuple := range r {
+				switch tuple.Attr {
+				case "id":
+					obj.Id = tuple.Val
+				case "type":
+					obj.Type = tuple.Val
+				case "cachepath":
+					bytes, err := os.ReadFile(filepath.Join(d.FSRoot, "objects", tuple.Val))
+
+					if err != nil {
+						log.Println(err)
+					}
+					obj.RawBytes = bytes
+				}
+			}
+			if processedb != nil {
+				processed := processedb.Search("id", obj.Id)
+				if len(processed) != 0 {
+					continue
+				}
+			}
+			if obj.RawBytes != nil {
+				wg.Add(1)
+				objstream <- obj
+			}
+		}
+		records = ndbdb.Search("type", "Undo")
+		for _, r := range records {
+			var obj activitypub.Object
+			for _, tuple := range r {
+				switch tuple.Attr {
+				case "id":
+					obj.Id = tuple.Val
+				case "type":
+					obj.Type = tuple.Val
+				case "cachepath":
+					bytes, err := os.ReadFile(filepath.Join(d.FSRoot, "objects", tuple.Val))
+
+					if err != nil {
+						log.Println(err)
+					}
+					obj.RawBytes = bytes
+				}
+			}
+			if processedb != nil {
+				processed := processedb.Search("id", obj.Id)
+				if len(processed) != 0 {
+					continue
+				}
+			}
+			if obj.RawBytes != nil {
+				wg.Add(1)
+				objstream <- obj
+			}
+		}
+		wg.Done()
+	}()
+	return returnstream
+}
+func (d *FileSystemDB) AddFollower(pagename string, request activitypub.Follow) error {
+	filename := filepath.Join(d.FSRoot, pages.Root, pagename, "followers.db")
+	followdb, err := ndb.Open(filename)
+
+	if records := followdb.Search("acceptedFrom", request.Id); len(records) != 0 {
+		return fmt.Errorf("Request already processed")
+	}
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	record := fmt.Sprintf("\nid=%s accepted=true PageName=%s acceptedFrom=%s\n", request.Actor, pagename, request.Id)
+	if _, err := f.WriteString(record); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *FileSystemDB) UndoFollow(pagename string, undo activitypub.Undo) error {
+	filename := filepath.Join(d.FSRoot, "undo.db")
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	record := fmt.Sprintf("\nid=%s type=Undo\n", undo.Object.Id)
+	if _, err := f.WriteString(record); err != nil {
+		return err
+	}
+	return nil
+}
+func (d *FileSystemDB) GetForeignActor(id string) (*activitypub.Actor, error) {
+	actordb, err := ndb.Open(filepath.Join(d.FSRoot, "actors.db"))
+	if err != nil {
+		return nil, err
+	}
+	records := actordb.Search("id", id)
+	if len(records) == 0 {
+		return nil, NotFound
+	}
+	if len(records) > 1 {
+		return nil, fmt.Errorf("Too many records in database")
+	}
+	var cachepath string
+	// The tuple has most of the things we need, but it doesn't have the key
+	// so we just look for cachepath and parse the whole thing
+	for _, tuple := range records[0] {
+		switch tuple.Attr {
+		case "cachepath":
+			cachepath = tuple.Val
+			break
+		}
+	}
+	if cachepath == "" {
+		return nil, NotFound
+	}
+	f, err := os.Open(filepath.Join(d.FSRoot, "actors", cachepath))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	bytes, err := io.ReadAll(f)
+	if err != nil {
+		return nil, err
+	}
+	var actor activitypub.Actor
+	if err := json.Unmarshal(bytes, &actor); err != nil {
+		return nil, err
+	}
+	log.Println("Got actor from filesystem")
+	return &actor, nil
+}
+
+func (d *FileSystemDB) StoreActor(actor activitypub.Actor, raw []byte) error {
+	filename := filepath.Join(d.FSRoot, "actors.db")
+	cachedir := filepath.Join(d.FSRoot, "actors")
+	if err := os.MkdirAll(cachedir, 0755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	record := fmt.Sprintf("\nid=%s type=%s\n", actor.Id, actor.Type)
+	record = fmt.Sprintf("%s\tinbox=%s outbox=%s\n", record, actor.Inbox, actor.Outbox)
+	record = fmt.Sprintf("%s\tfollowing=%s followers=%s\n", record, actor.Following, actor.Followers)
+	record = fmt.Sprintf("%s\tpreferredUsername=%s\n", record, actor.PreferredUsername)
+	record = fmt.Sprintf("%s\tname=%s\n", record, actor.Name)
+	if actor.ProfileIcon != "" {
+		record = fmt.Sprintf("%s\tprofileIcon=%s\n", record, actor.ProfileIcon)
+	}
+	fname := base64.URLEncoding.EncodeToString([]byte(actor.Id))
+	record = fmt.Sprintf("%s\tcachepath=%s", record, fname)
+
+	if err := os.WriteFile(filepath.Join(cachedir, fname), raw, 0644); err != nil {
+		return err
+	}
 	if _, err := f.WriteString(record); err != nil {
 		return err
 	}

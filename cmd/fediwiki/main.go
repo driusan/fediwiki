@@ -16,8 +16,10 @@ import (
 	"sort"
 	"strings"
 
+	"fediwiki/activitypub"
 	"fediwiki/filesystemdb"
 	"fediwiki/httpsig"
+	"fediwiki/inbox"
 	"fediwiki/pages"
 	"fediwiki/session"
 
@@ -73,7 +75,7 @@ func getHeader(s *session.Session, pagename string) template.HTML {
 	return template.HTML(b.Bytes())
 }
 
-func createPage(session *session.Session, page string, adb ActorPersister, db pages.Persister, w http.ResponseWriter, r *http.Request) {
+func createPage(session *session.Session, page string, adb pages.PagesDatabase, db pages.Persister, w http.ResponseWriter, r *http.Request) {
 	var b bytes.Buffer
 	if err := editTemplate.Execute(&b, pages.Page{}); err != nil {
 		w.WriteHeader(500)
@@ -166,7 +168,7 @@ func wikipagerev(session *session.Session, pagename, rev string, db pages.Persis
 		io.WriteString(w, "Invalid method")
 	}
 }
-func wikipage(session *session.Session, pagename string, adb ActorPersister, db pages.Persister, w http.ResponseWriter, r *http.Request) {
+func wikipage(session *session.Session, pagename string, adb pages.PagesDatabase, db pages.Persister, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		page, err := db.GetPage(pagename)
@@ -255,7 +257,7 @@ func wikipage(session *session.Session, pagename string, adb ActorPersister, db 
 	}
 }
 
-func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.Store, keystore httpsig.KeyStore, objectDB ObjectPersister, prefix string) func(w http.ResponseWriter, r *http.Request) {
+func rootPage(pagesdb pages.PagesDatabase, pagedb pages.Persister, sessionDB session.Store, keystore httpsig.KeyStore, objectDB activitypub.ObjectDatabase, actorDb activitypub.ActorDatabase, activityDb activitypub.ActivityDatabase, prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println(r.URL.Path)
 		sess, err := session.Start(sessionDB, w, r)
@@ -266,19 +268,19 @@ func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.
 		urlPieces := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
 		switch len(urlPieces) {
 		case 0:
-			wikipage(sess, frontPage, actordb, pagedb, w, r)
+			wikipage(sess, frontPage, pagesdb, pagedb, w, r)
 			return
 		case 1:
 			if urlPieces[0] == "" {
-				wikipage(sess, frontPage, actordb, pagedb, w, r)
+				wikipage(sess, frontPage, pagesdb, pagedb, w, r)
 				return
 			}
-			wikipage(sess, urlPieces[0], actordb, pagedb, w, r)
+			wikipage(sess, urlPieces[0], pagesdb, pagedb, w, r)
 			return
 		case 2:
 			switch urlPieces[1] {
 			case "actor":
-				act, err := actordb.GetPageActor(urlPieces[0])
+				act, err := pagesdb.GetPageActor(urlPieces[0])
 				if err != nil {
 					log.Println(err)
 					// FIXME: Be smarter about error
@@ -325,7 +327,7 @@ func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.
 			case "inbox":
 				switch r.Method {
 				case "GET":
-					_, err := actordb.GetPageActor(urlPieces[0])
+					_, err := pagesdb.GetPageActor(urlPieces[0])
 
 					if err != nil {
 						if err == filesystemdb.NotFound {
@@ -343,10 +345,6 @@ func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.
 						fmt.Fprintf(w, "Could not validate http signature\n")
 						return
 					}
-					var incoming struct {
-						Id   string `json:"id"`
-						Type string `json:"type"`
-					}
 					bytes, err := io.ReadAll(r.Body)
 					if err != nil {
 						log.Println(err)
@@ -354,12 +352,14 @@ func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.
 						return
 					}
 
-					if err := json.Unmarshal(bytes, &incoming); err != nil {
+					var inbound activitypub.Object
+					if err := json.Unmarshal(bytes, &inbound); err != nil {
 						log.Println(err)
-						w.WriteHeader(400)
+						badRequest(w, r)
 						return
 					}
-					if err := objectDB.SaveObject(incoming.Id, incoming.Type, bytes); err != nil {
+					inbound.RawBytes = bytes
+					if err := inbox.Process(objectDB, pagesdb, actorDb, activityDb, inbound); err != nil {
 						if err == filesystemdb.BadId {
 							badRequest(w, r)
 							return
@@ -372,6 +372,7 @@ func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.
 					w.Header().Set("Content-Type", "application/json")
 					fmt.Fprintf(w, `{ "okay" : "accepted" }`)
 				}
+
 				return
 			case "outbox":
 				notImplemented(w, r)
@@ -544,7 +545,7 @@ func main() {
 		log.Fatal("Missing fediwikidomain")
 	}
 	mux.HandleFunc("/.well-known/webfinger", webFingerHandler(&db))
-	mux.HandleFunc(pages.Root, rootPage(&db, &db, &db, &db, &db, pages.Root))
+	mux.HandleFunc(pages.Root, rootPage(&db, &db, &db, &db, &db, &db, &db, pages.Root))
 	mux.HandleFunc("/login/", loginHandler(&db, &db))
 	mux.HandleFunc("/logout", logoutHandler(&db))
 	mux.HandleFunc("/", redirectToPagesRoot)
