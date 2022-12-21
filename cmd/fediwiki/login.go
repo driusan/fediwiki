@@ -15,6 +15,8 @@ import (
 	"os"
 	"regexp"
 
+	"fediwiki/oauth"
+	"fediwiki/pages"
 	"fediwiki/session"
 
 	"golang.org/x/oauth2"
@@ -22,7 +24,7 @@ import (
 
 var loginTemplate *template.Template
 
-func loginHandler(clientDB OAuthClientStore, sessionDB session.Store) func(w http.ResponseWriter, r *http.Request) {
+func loginHandler(clientDB oauth.ClientStore, sessionDB session.Store) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println("URL", r.URL.Path)
 		session, err := session.Start(sessionDB, w, r)
@@ -74,7 +76,7 @@ func loginHandler(clientDB OAuthClientStore, sessionDB session.Store) func(w htt
 					w.WriteHeader(500)
 					return
 				}
-				http.Redirect(w, r, pagesRoot, http.StatusSeeOther)
+				http.Redirect(w, r, pages.Root, http.StatusSeeOther)
 				return
 			}
 			var b bytes.Buffer
@@ -204,7 +206,7 @@ func loginHandler(clientDB OAuthClientStore, sessionDB session.Store) func(w htt
 	}
 }
 
-func registerApp(db OAuthClientStore, hostname string) (OAuthClient, error) {
+func registerApp(db oauth.ClientStore, hostname string) (oauth.Client, error) {
 	// FIXME: Guess the type of host. For now, assuming Mastodon and
 	// the mastodon api to register the app.
 	// Ideally we'd use a less vendor-specific API
@@ -216,16 +218,16 @@ func registerApp(db OAuthClientStore, hostname string) (OAuthClient, error) {
 	values.Set("scopes", "read read:accounts")
 	req, err := http.PostForm(registerURL, values)
 	if err != nil {
-		return OAuthClient{}, err
+		return oauth.Client{}, err
 	}
 	defer req.Body.Close()
 	resp, err := io.ReadAll(req.Body)
 	if err != nil {
-		return OAuthClient{}, err
+		return oauth.Client{}, err
 	}
 	fmt.Println(string(resp))
 
-	var appRegisterResponse OAuthClient
+	var appRegisterResponse oauth.Client
 	if err := json.Unmarshal(resp, &appRegisterResponse); err != nil {
 		return appRegisterResponse, err
 	}
@@ -243,7 +245,7 @@ func logoutHandler(sessionDB session.Store) func(w http.ResponseWriter, r *http.
 		log.Println("URL", r.URL.Path)
 		session, err := session.Start(sessionDB, w, r)
 		if err != nil {
-			http.Redirect(w, r, pagesRoot, http.StatusSeeOther)
+			http.Redirect(w, r, pages.Root, http.StatusSeeOther)
 			return
 		}
 		if err := sessionDB.DestroySession(session); err != nil {
@@ -252,6 +254,6 @@ func logoutHandler(sessionDB session.Store) func(w http.ResponseWriter, r *http.
 			fmt.Fprintf(w, "Something went wrong.\n")
 			return
 		}
-		http.Redirect(w, r, pagesRoot, http.StatusSeeOther)
+		http.Redirect(w, r, pages.Root, http.StatusSeeOther)
 	}
 }

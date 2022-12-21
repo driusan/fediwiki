@@ -1,4 +1,4 @@
-package main
+package filesystemdb
 
 import (
 	"crypto"
@@ -16,6 +16,10 @@ import (
 
 	"path/filepath"
 
+	"fediwiki/activitypub"
+	"fediwiki/httpsig"
+	"fediwiki/oauth"
+	"fediwiki/pages"
 	"fediwiki/session"
 
 	"github.com/mischief/ndb"
@@ -28,9 +32,9 @@ type FileSystemDB struct {
 	FSRoot string
 }
 
-func (db *FileSystemDB) GetPageActor(page string) (*Profile, error) {
-	filename := filepath.Join(db.FSRoot, pagesRoot, page, "actor.json")
-	if !strings.HasPrefix(filename, db.FSRoot+pagesRoot) {
+func (db *FileSystemDB) GetPageActor(page string) (*activitypub.Actor, error) {
+	filename := filepath.Join(db.FSRoot, pages.Root, page, "actor.json")
+	if !strings.HasPrefix(filename, db.FSRoot+pages.Root) {
 		// They were trying to use ../.. or something to escape the
 		// filesystem
 		return nil, fmt.Errorf("Invalid page name")
@@ -42,23 +46,23 @@ func (db *FileSystemDB) GetPageActor(page string) (*Profile, error) {
 	if err != nil {
 		return nil, err
 	}
-	var p Profile
+	var p activitypub.Actor
 	if err := json.Unmarshal(bytes, &p); err != nil {
 		return nil, err
 	}
 	return &p, nil
 }
 
-func (db *FileSystemDB) NewPageActor(p Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*Profile, error) {
-	pageurl := "https://" + domain + pagesRoot + p.PageName
+func (db *FileSystemDB) NewPageActor(p pages.Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*activitypub.Actor, error) {
+	pageurl := "https://" + domain + pages.Root + p.PageName
 	id := pageurl + "/actor"
 	keybytes, err := x509.MarshalPKIXPublicKey(public)
 	if err != nil {
 		return nil, err
 	}
 	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: keybytes})
-	prof := &Profile{
-		Context:           JsonLDContext{"https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"},
+	prof := &activitypub.Actor{
+		Context:           activitypub.JSONLDContext{"https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"},
 		Id:                id,
 		Type:              "Service",
 		PreferredUsername: p.PageName,
@@ -66,14 +70,14 @@ func (db *FileSystemDB) NewPageActor(p Page, domain string, private crypto.Priva
 		Summary:           p.Summary,
 		Inbox:             pageurl + "/inbox",
 		Outbox:            pageurl + "/outbox",
-		PublicKey: PublicKey{
+		PublicKey: activitypub.PublicKey{
 			Id:           id + "#main-key",
 			Owner:        id,
 			PublicKeyPem: string(block),
 		},
 	}
-	filedir := filepath.Join(db.FSRoot, pagesRoot, p.PageName)
-	if !strings.HasPrefix(filedir, db.FSRoot+pagesRoot) {
+	filedir := filepath.Join(db.FSRoot, pages.Root, p.PageName)
+	if !strings.HasPrefix(filedir, db.FSRoot+pages.Root) {
 		// Make sure no ones trying to escape with a ../../ or something
 		return nil, fmt.Errorf("Unknown error creating directory")
 	}
@@ -98,8 +102,8 @@ func (db *FileSystemDB) NewPageActor(p Page, domain string, private crypto.Priva
 	return prof, nil
 }
 
-func (db *FileSystemDB) GetPage(pagename string) (*Page, error) {
-	var p Page
+func (db *FileSystemDB) GetPage(pagename string) (*pages.Page, error) {
+	var p pages.Page
 	if pagename == "" {
 		return nil, fmt.Errorf("No page name")
 	}
@@ -137,8 +141,8 @@ func (db *FileSystemDB) GetPage(pagename string) (*Page, error) {
 
 	return &p, nil
 }
-func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*Page, error) {
-	var p Page
+func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*pages.Page, error) {
+	var p pages.Page
 	if pagename == "" {
 		return nil, fmt.Errorf("No page name")
 	}
@@ -172,7 +176,7 @@ func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*Page, error
 
 	return &p, nil
 }
-func (db *FileSystemDB) SavePage(p Page, prof Profile, editor string) error {
+func (db *FileSystemDB) SavePage(p pages.Page, prof activitypub.Actor, editor string) error {
 	if p.PageName == "" {
 		return fmt.Errorf("No page name")
 	}
@@ -230,10 +234,10 @@ func (db *FileSystemDB) SavePage(p Page, prof Profile, editor string) error {
 	return nil
 }
 
-func (db *FileSystemDB) GetClient(hostname string) (OAuthClient, error) {
+func (db *FileSystemDB) GetClient(hostname string) (oauth.Client, error) {
 	oauthdb, err := ndb.Open(db.FSRoot + "/oauthclients.db")
 	if err != nil {
-		return OAuthClient{}, fmt.Errorf("No clients registered")
+		return oauth.Client{}, fmt.Errorf("No clients registered")
 	}
 
 	records := oauthdb.Search("hostname", hostname)
@@ -241,9 +245,9 @@ func (db *FileSystemDB) GetClient(hostname string) (OAuthClient, error) {
 		panic("too many hostnames")
 	}
 	if len(records) == 0 {
-		return OAuthClient{}, fmt.Errorf("No client for %s", hostname)
+		return oauth.Client{}, fmt.Errorf("No client for %s", hostname)
 	}
-	var client OAuthClient
+	var client oauth.Client
 	for _, tuple := range records[0] {
 		switch tuple.Attr {
 		case "remoteid":
@@ -264,7 +268,7 @@ func (db *FileSystemDB) GetClient(hostname string) (OAuthClient, error) {
 	return client, nil
 }
 
-func (db *FileSystemDB) StoreClient(hostname string, c OAuthClient) error {
+func (db *FileSystemDB) StoreClient(hostname string, c oauth.Client) error {
 	if _, err := db.GetClient(hostname); err == nil {
 		return fmt.Errorf("%s already registered", hostname)
 	}
@@ -330,16 +334,16 @@ func (db *FileSystemDB) DestroySession(s *session.Session) error {
 	}
 	return os.RemoveAll(dir)
 }
-func (db *FileSystemDB) GetPageRevisions(pagename string) ([]Revision, error) {
+func (db *FileSystemDB) GetPageRevisions(pagename string) ([]pages.Revision, error) {
 	pagesdb, err := ndb.Open(filepath.Join(db.FSRoot, "pages", pagename, "revisions.db"))
 	if err != nil {
 		return nil, err
 	}
-	var result []Revision = nil
+	var result []pages.Revision = nil
 
-	pages := pagesdb.Search("pagename", pagename)
-	for _, rowtuple := range pages {
-		var rev Revision
+	ndbpages := pagesdb.Search("pagename", pagename)
+	for _, rowtuple := range ndbpages {
+		var rev pages.Revision
 		for _, tuple := range rowtuple {
 			switch tuple.Attr {
 			case "id":
@@ -361,20 +365,30 @@ func (db *FileSystemDB) GetPageRevisions(pagename string) ([]Revision, error) {
 	}
 	return result, nil
 }
-func (d *FileSystemDB) SaveObject(id, body string) error {
+func (d *FileSystemDB) SaveObject(id, type_ string, body []byte) error {
 	if !strings.HasPrefix(id, "https://") {
 		return BadId
 	}
-	path := strings.TrimPrefix(id, "https://")
-	dir := filepath.Join(d.FSRoot, "objects", filepath.Dir(path))
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	path := base64.URLEncoding.EncodeToString([]byte(id))
+
+	if err := os.MkdirAll(filepath.Join(d.FSRoot, "objects", filepath.Dir(path)), 0755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", path), []byte(body), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", path), body, 0644); err != nil {
+		return err
+	}
+
+	f, err := os.OpenFile(filepath.Join(d.FSRoot, "objects", "objects.db"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	record := fmt.Sprintf("\nid=%s type=%s cachepath=%s\n", id, type_, path)
+	if _, err := f.WriteString(record); err != nil {
 		return err
 	}
 	return nil
-
 }
 
 func (d *FileSystemDB) GetKey(keyid string) (crypto.PublicKey, error) {
@@ -383,7 +397,7 @@ func (d *FileSystemDB) GetKey(keyid string) (crypto.PublicKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	records := ndb.Search("keyid", keyid)
 	if len(records) == 0 {
 		return nil, fmt.Errorf("No records found")
@@ -409,7 +423,7 @@ func (d *FileSystemDB) GetKey(keyid string) (crypto.PublicKey, error) {
 			break
 		}
 	}
-	return parsePemKey(keyid, owner, data, nil)
+	return httpsig.ParsePemKey(keyid, owner, data, nil)
 }
 
 func (d *FileSystemDB) SaveKey(keyid, owner string, pembytes []byte) error {

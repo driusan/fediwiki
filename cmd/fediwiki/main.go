@@ -16,6 +16,9 @@ import (
 	"sort"
 	"strings"
 
+	"fediwiki/filesystemdb"
+	"fediwiki/httpsig"
+	"fediwiki/pages"
 	"fediwiki/session"
 
 	"golang.org/x/crypto/acme/autocert"
@@ -25,7 +28,6 @@ import (
 	"github.com/gomarkdown/markdown/parser"
 )
 
-const pagesRoot = "/pages/"
 const frontPage = "FrontPage"
 
 var pageTemplate, editTemplate, loggedInHeader *template.Template
@@ -71,9 +73,9 @@ func getHeader(s *session.Session, pagename string) template.HTML {
 	return template.HTML(b.Bytes())
 }
 
-func createPage(session *session.Session, page string, adb ActorPersister, db PagePersister, w http.ResponseWriter, r *http.Request) {
+func createPage(session *session.Session, page string, adb ActorPersister, db pages.Persister, w http.ResponseWriter, r *http.Request) {
 	var b bytes.Buffer
-	if err := editTemplate.Execute(&b, Page{}); err != nil {
+	if err := editTemplate.Execute(&b, pages.Page{}); err != nil {
 		w.WriteHeader(500)
 		return
 	}
@@ -95,7 +97,7 @@ func hasEditPermission(session *session.Session) bool {
 	return session.Get("OAuthAuthenticatedUsername") != ""
 }
 
-func pagehistory(session *session.Session, pagename string, historydb PagePersister, w http.ResponseWriter, r *http.Request) {
+func pagehistory(session *session.Session, pagename string, historydb pages.Persister, w http.ResponseWriter, r *http.Request) {
 	revs, err := historydb.GetPageRevisions(pagename)
 	if err != nil {
 		notFound(w, r)
@@ -108,7 +110,7 @@ func pagehistory(session *session.Session, pagename string, historydb PagePersis
 		return revs[i].EditTime.After(*(revs[j].EditTime))
 	})
 	for _, rev := range revs {
-		fmt.Fprintf(&b, "<li><a href=\"%s%s/history/%s\">%v</a>: edited by %v</li>\n", pagesRoot, pagename, rev.RevisionID, rev.EditTime, rev.Editor)
+		fmt.Fprintf(&b, "<li><a href=\"%s%s/history/%s\">%v</a>: edited by %v</li>\n", pages.Root, pagename, rev.RevisionID, rev.EditTime, rev.Editor)
 	}
 	fmt.Fprintf(&b, "</ul>")
 	pageTemplate.Execute(
@@ -121,7 +123,7 @@ func pagehistory(session *session.Session, pagename string, historydb PagePersis
 	)
 }
 
-func renderPage(page Page) template.HTML {
+func renderPage(page pages.Page) template.HTML {
 	contentparser := parser.NewWithExtensions(parser.CommonExtensions)
 	summaryrenderer := html.NewRenderer(html.RendererOptions{Flags: html.CommonFlags | html.SkipHTML})
 	contentrenderer := html.NewRenderer(html.RendererOptions{Flags: html.CommonFlags | html.SkipHTML | html.TOC})
@@ -130,18 +132,18 @@ func renderPage(page Page) template.HTML {
 	internalLink := regexp.MustCompile(`\[\[([[:alpha:]]+)\]\]`)
 
 	content := string(markdown.ToHTML([]byte(page.Content), contentparser, contentrenderer))
-	content = federatedLink.ReplaceAllString(content, `<a href="https://$2/`+pagesRoot+` "/$1">$1 ($2)</a>`)
-	content = internalLink.ReplaceAllString(content, `<a href="`+pagesRoot+`/$1">$1</a>`)
+	content = federatedLink.ReplaceAllString(content, `<a href="https://$2/`+pages.Root+` "/$1">$1 ($2)</a>`)
+	content = internalLink.ReplaceAllString(content, `<a href="`+pages.Root+`/$1">$1</a>`)
 	var summary string
 	if page.Summary != "" {
 		summaryparser := parser.NewWithExtensions(parser.CommonExtensions)
 		summary = string(markdown.ToHTML([]byte(page.Summary), summaryparser, summaryrenderer))
-		summary = federatedLink.ReplaceAllString(summary, `<a href="https://$2/`+pagesRoot+` "/$1">$1 ($2)</a>`)
-		summary = internalLink.ReplaceAllString(summary, `<a href="`+pagesRoot+`/$1">$1</a>`)
+		summary = federatedLink.ReplaceAllString(summary, `<a href="https://$2/`+pages.Root+` "/$1">$1 ($2)</a>`)
+		summary = internalLink.ReplaceAllString(summary, `<a href="`+pages.Root+`/$1">$1</a>`)
 	}
 	return template.HTML(summary + content)
 }
-func wikipagerev(session *session.Session, pagename, rev string, db PagePersister, w http.ResponseWriter, r *http.Request) {
+func wikipagerev(session *session.Session, pagename, rev string, db pages.Persister, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		page, err := db.GetPageRevision(pagename, rev)
@@ -164,7 +166,7 @@ func wikipagerev(session *session.Session, pagename, rev string, db PagePersiste
 		io.WriteString(w, "Invalid method")
 	}
 }
-func wikipage(session *session.Session, pagename string, adb ActorPersister, db PagePersister, w http.ResponseWriter, r *http.Request) {
+func wikipage(session *session.Session, pagename string, adb ActorPersister, db pages.Persister, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		page, err := db.GetPage(pagename)
@@ -214,14 +216,14 @@ func wikipage(session *session.Session, pagename string, adb ActorPersister, db 
 			io.WriteString(w, "Invalid form data")
 			return
 		}
-		page := Page{
+		page := pages.Page{
 			PageName: pagename,
 			Title:    r.Form.Get("title"),
 			Summary:  r.Form.Get("summary"),
 			Content:  r.Form.Get("content"),
 		}
 		pageactor, err := adb.GetPageActor(pagename)
-		if err == NotFound {
+		if err == filesystemdb.NotFound {
 			key, err := rsa.GenerateKey(rand.Reader, 4096)
 			if err != nil {
 				log.Println(err)
@@ -243,7 +245,7 @@ func wikipage(session *session.Session, pagename string, adb ActorPersister, db 
 			w.WriteHeader(500)
 			io.WriteString(w, "Internal server error")
 		}
-		http.Redirect(w, r, pagesRoot+page.PageName, 303)
+		http.Redirect(w, r, pages.Root+page.PageName, 303)
 	default:
 		w.WriteHeader(405)
 		// Should be PUT, but html is stupid and doesn't let us send a PUT request from a form
@@ -253,7 +255,7 @@ func wikipage(session *session.Session, pagename string, adb ActorPersister, db 
 	}
 }
 
-func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.Store, keystore KeyStore, objectDB ObjectPersister, prefix string) func(w http.ResponseWriter, r *http.Request) {
+func rootPage(actordb ActorPersister, pagedb pages.Persister, sessionDB session.Store, keystore httpsig.KeyStore, objectDB ObjectPersister, prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println(r.URL.Path)
 		sess, err := session.Start(sessionDB, w, r)
@@ -326,7 +328,7 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 					_, err := actordb.GetPageActor(urlPieces[0])
 
 					if err != nil {
-						if err == NotFound {
+						if err == filesystemdb.NotFound {
 							notFound(w, r)
 						} else {
 							log.Println(w, r)
@@ -335,7 +337,7 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 						return
 					}
 				case "POST":
-					if err := validateHttpSig(r, keystore); err != nil {
+					if err := httpsig.Validate(r, keystore); err != nil {
 						log.Println(err)
 						badRequest(w, r)
 						fmt.Fprintf(w, "Could not validate http signature\n")
@@ -357,8 +359,8 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 						w.WriteHeader(400)
 						return
 					}
-					if err := objectDB.SaveObject(incoming.Id, string(bytes)); err != nil {
-						if err == BadId {
+					if err := objectDB.SaveObject(incoming.Id, incoming.Type, bytes); err != nil {
+						if err == filesystemdb.BadId {
 							badRequest(w, r)
 							return
 						}
@@ -396,7 +398,7 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 }
 
 func redirectToPagesRoot(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, pagesRoot+r.URL.Path, http.StatusSeeOther)
+	http.Redirect(w, r, pages.Root+r.URL.Path, http.StatusSeeOther)
 }
 func main() {
 	mux := http.NewServeMux()
@@ -498,8 +500,8 @@ func main() {
         <header>
             <nav>
                 <ul>
-                    <li><a href="` + pagesRoot + `">Home</a></li>
-                    <li><a href="` + pagesRoot + `{{.PageName}}/history">Page history</a></li>
+                    <li><a href="` + pages.Root + `">Home</a></li>
+                    <li><a href="` + pages.Root + `{{.PageName}}/history">Page history</a></li>
                 </ul>
             </nav>
 
@@ -518,8 +520,8 @@ func main() {
         <header>
             <nav>
                 <ul>
-                    <li><a href="` + pagesRoot + `">Home</a></li>
-                    <li><a href="` + pagesRoot + `{{.PageName}}/history">Page history</a></li>
+                    <li><a href="` + pages.Root + `">Home</a></li>
+                    <li><a href="` + pages.Root + `{{.PageName}}/history">Page history</a></li>
                 </ul>
             </nav>
             <div>Logged in as {{.Username}}</div>
@@ -531,7 +533,7 @@ func main() {
             </nav>
         </header>
     `))
-	var db FileSystemDB
+	var db filesystemdb.FileSystemDB
 	if root := os.Getenv("fediwikiroot"); root != "" {
 		db.FSRoot = root
 	} else {
@@ -542,7 +544,7 @@ func main() {
 		log.Fatal("Missing fediwikidomain")
 	}
 	mux.HandleFunc("/.well-known/webfinger", webFingerHandler(&db))
-	mux.HandleFunc(pagesRoot, rootPage(&db, &db, &db, &db, &db, pagesRoot))
+	mux.HandleFunc(pages.Root, rootPage(&db, &db, &db, &db, &db, pages.Root))
 	mux.HandleFunc("/login/", loginHandler(&db, &db))
 	mux.HandleFunc("/logout", logoutHandler(&db))
 	mux.HandleFunc("/", redirectToPagesRoot)

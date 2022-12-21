@@ -1,4 +1,4 @@
-package main
+package httpsig
 
 import (
 	"crypto"
@@ -13,6 +13,11 @@ import (
 	"github.com/go-fed/httpsig"
 )
 
+type KeyStore interface {
+	GetKey(keyid string) (crypto.PublicKey, error)
+	SaveKey(keyid, owner string, pemBytes []byte) error
+}
+
 // An ActivityPub actor object. Only the parts
 // we care about.
 type actorKeyObject struct {
@@ -23,7 +28,7 @@ type actorKeyObject struct {
 	} `json:"publicKey"`
 }
 
-func validateHttpSig(r *http.Request, keycache KeyStore) error {
+func Validate(r *http.Request, keycache KeyStore) error {
 	verifier, err := httpsig.NewVerifier(r)
 	if err != nil {
 		return err
@@ -70,7 +75,7 @@ func getKey(keyId string, keycache KeyStore) (crypto.PublicKey, error) {
 	if actor.PublicKey.Id != keyId {
 		return nil, fmt.Errorf("Could not retrieve %v, got %v", keyId, actor.PublicKey.Id)
 	}
-	return parsePemKey(keyId, actor.PublicKey.Owner, []byte(actor.PublicKey.PublicKeyPem), keycache)
+	return ParsePemKey(keyId, actor.PublicKey.Owner, []byte(actor.PublicKey.PublicKeyPem), keycache)
 }
 
 // httpsig doesn't like the algorithm header, but we do.
@@ -91,7 +96,7 @@ func getAlgorithm(header string) (httpsig.Algorithm, error) {
 	return "", fmt.Errorf("Could not determine algorithm")
 }
 
-func parsePemKey(keyId, owner string, pemKey []byte, keycache KeyStore) (crypto.PublicKey, error) {
+func ParsePemKey(keyId, owner string, pemKey []byte, keycache KeyStore) (crypto.PublicKey, error) {
 	pemBlock, _ := pem.Decode(pemKey)
 	if pemBlock == nil {
 		return nil, fmt.Errorf("No PEM block in key")

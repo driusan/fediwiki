@@ -1,6 +1,4 @@
-package main
-
-import "encoding/json"
+package activitypub
 
 type PublicKey struct {
 	Id           string `json:"id"`
@@ -8,10 +6,8 @@ type PublicKey struct {
 	PublicKeyPem string `json:"publicKeyPem"`
 }
 
-type JsonLDContext []string
-
-type Profile struct {
-	Context           JsonLDContext `json:"@context"`
+type Actor struct {
+	Context           JSONLDContext `json:"@context"`
 	Id                string        `json:"id"`
 	Type              string        `json:"type"`
 	PreferredUsername string        `json:"preferredUsername"`
@@ -20,15 +16,4 @@ type Profile struct {
 	Inbox             string        `json:"inbox"`
 	Outbox            string        `json:"outbox"`
 	PublicKey         PublicKey     `json:"publicKey"`
-}
-
-func (c JsonLDContext) MarshalJSON() ([]byte, error) {
-	switch len(c) {
-	case 0:
-		return nil, nil
-	case 1:
-		return json.Marshal(c[0])
-	default:
-		return json.Marshal([]string(c))
-	}
 }
