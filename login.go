@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 
 	"fediwiki/session"
@@ -211,7 +212,7 @@ func registerApp(db OAuthClientStore, hostname string) (OAuthClient, error) {
 	registerURL := "https://" + hostname + "/api/v1/apps"
 	values := make(url.Values)
 	values.Set("client_name", "Fediwiki")
-	values.Set("redirect_uris", "http://localhost:3333/login")
+	values.Set("redirect_uris", "https://"+os.Getenv("fediwikidomain")+"/login")
 	values.Set("scopes", "read read:accounts")
 	req, err := http.PostForm(registerURL, values)
 	if err != nil {

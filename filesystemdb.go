@@ -22,6 +22,7 @@ import (
 )
 
 var NotFound error = errors.New("Not Found")
+var BadId error = errors.New("Bad id")
 
 type FileSystemDB struct {
 	FSRoot string
@@ -34,7 +35,6 @@ func (db *FileSystemDB) GetPageActor(page string) (*Profile, error) {
 		// filesystem
 		return nil, fmt.Errorf("Invalid page name")
 	}
-	log.Println(filename)
 	if _, err := os.Stat(filename); errors.Is(err, os.ErrNotExist) {
 		return nil, NotFound
 	}
@@ -58,6 +58,7 @@ func (db *FileSystemDB) NewPageActor(p Page, domain string, private crypto.Priva
 	}
 	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: keybytes})
 	prof := &Profile{
+		Context:           JsonLDContext{"https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"},
 		Id:                id,
 		Type:              "Service",
 		PreferredUsername: p.PageName,
@@ -359,4 +360,81 @@ func (db *FileSystemDB) GetPageRevisions(pagename string) ([]Revision, error) {
 		result = append(result, rev)
 	}
 	return result, nil
+}
+func (d *FileSystemDB) SaveObject(id, body string) error {
+	if !strings.HasPrefix(id, "https://") {
+		return BadId
+	}
+	path := strings.TrimPrefix(id, "https://")
+	dir := filepath.Join(d.FSRoot, "objects", filepath.Dir(path))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", path), []byte(body), 0644); err != nil {
+		return err
+	}
+	return nil
+
+}
+
+func (d *FileSystemDB) GetKey(keyid string) (crypto.PublicKey, error) {
+	ndbDir := filepath.Join(d.FSRoot, "keys")
+	ndb, err := ndb.Open(filepath.Join(ndbDir, "knownkeys.db"))
+	if err != nil {
+		return nil, err
+	}
+	
+	records := ndb.Search("keyid", keyid)
+	if len(records) == 0 {
+		return nil, fmt.Errorf("No records found")
+	}
+
+	var data []byte
+	var owner string
+	for _, record := range records {
+		for _, tuple := range record {
+			switch tuple.Attr {
+			case "owner":
+				owner = tuple.Val
+			case "cachepath":
+				filedata, err := os.ReadFile(filepath.Join(ndbDir, tuple.Val))
+				if err != nil {
+					return nil, err
+				}
+				data = filedata
+			default:
+			}
+		}
+		if owner != "" && data != nil {
+			break
+		}
+	}
+	return parsePemKey(keyid, owner, data, nil)
+}
+
+func (d *FileSystemDB) SaveKey(keyid, owner string, pembytes []byte) error {
+	ndbDir := filepath.Join(d.FSRoot, "keys")
+	if err := os.MkdirAll(ndbDir, 0775); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(
+		filepath.Join(ndbDir, "knownkeys.db"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY,
+		0644,
+	)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	keyfilename := base64.URLEncoding.EncodeToString([]byte(keyid))
+	fullkeyfilename := filepath.Join(ndbDir, keyfilename)
+	if err := os.WriteFile(fullkeyfilename, pembytes, 0644); err != nil {
+		return err
+	}
+	record := fmt.Sprintf("\nkeyid=%s owner=%s cachepath=%s\n", keyid, owner, keyfilename)
+
+	if _, err := f.WriteString(record); err != nil {
+		return err
+	}
+	return nil
 }

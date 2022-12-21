@@ -18,6 +18,8 @@ import (
 
 	"fediwiki/session"
 
+	"golang.org/x/crypto/acme/autocert"
+
 	"github.com/gomarkdown/markdown"
 	"github.com/gomarkdown/markdown/html"
 	"github.com/gomarkdown/markdown/parser"
@@ -38,6 +40,11 @@ func internalError(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(500)
 	io.WriteString(w, "Internal Server error\n")
 }
+func badRequest(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(400)
+	io.WriteString(w, "Bad Request\n")
+}
+
 func notFound(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(404)
 	io.WriteString(w, "Not found\n")
@@ -49,16 +56,15 @@ func notImplemented(w http.ResponseWriter, r *http.Request) {
 }
 
 func getHeader(s *session.Session, pagename string) template.HTML {
+	var b bytes.Buffer
 	if s != nil {
 		if user := s.Get("OAuthAuthenticatedUsername"); user != "" {
-			var b bytes.Buffer
 			if err := loggedInHeader.Execute(&b, struct{ PageName, Username string }{pagename, user}); err != nil {
 				panic(err)
 			}
 			return template.HTML(b.Bytes())
 		}
 	}
-	var b bytes.Buffer
 	if err := loginTemplate.Execute(&b, struct{ PageName string }{pagename}); err != nil {
 		panic(err)
 	}
@@ -247,7 +253,7 @@ func wikipage(session *session.Session, pagename string, adb ActorPersister, db 
 	}
 }
 
-func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.Store, prefix string) func(w http.ResponseWriter, r *http.Request) {
+func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.Store, keystore KeyStore, objectDB ObjectPersister, prefix string) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println(r.URL.Path)
 		sess, err := session.Start(sessionDB, w, r)
@@ -284,22 +290,86 @@ func rootPage(actordb ActorPersister, pagedb PagePersister, sessionDB session.St
 					notImplemented(w, r)
 					return
 				}
-				w.Header().Set("Content-Type", "application/activity+json")
+				accept := strings.Split(r.Header.Get("Accept"), ",")
+				log.Println(r.Header.Get("Accept"))
+				log.Println(accept)
+				setContent := false
+				for _, val := range accept {
+					switch strings.TrimSpace(val) {
+					case "application/activity+json":
+						w.Header().Set("Content-Type", `application/activity+json`)
+						log.Println("Set activity+json")
+						setContent = true
+					case `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`:
+						w.Header().Set("Content-Type", `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`)
+						setContent = true
+					case "application/ld+json":
+						w.Header().Set("Content-Type", `application/ld+json`)
+						log.Println("Set ld+json")
+						setContent = true
+					case "*/*":
+						w.Header().Set("Content-Type", `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`)
+						setContent = true
+					}
+					if setContent {
+						break
+					}
+				}
+				if setContent == false {
+					w.Header().Set("Content-Type", `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`)
+				}
 				w.Write(val)
 				return
 			case "inbox":
-				_, err := actordb.GetPageActor(urlPieces[0])
+				switch r.Method {
+				case "GET":
+					_, err := actordb.GetPageActor(urlPieces[0])
 
-                if err != nil {
-                    if err == NotFound {
-                        notFound(w, r)
-                    } else {
-                        log.Println(w, r)
-                        internalError(w, r)
-                    }
-                    return
-                }
-                notImplemented(w, r)
+					if err != nil {
+						if err == NotFound {
+							notFound(w, r)
+						} else {
+							log.Println(w, r)
+							internalError(w, r)
+						}
+						return
+					}
+				case "POST":
+					if err := validateHttpSig(r, keystore); err != nil {
+						log.Println(err)
+						badRequest(w, r)
+						fmt.Fprintf(w, "Could not validate http signature\n")
+						return
+					}
+					var incoming struct {
+						Id   string `json:"id"`
+						Type string `json:"type"`
+					}
+					bytes, err := io.ReadAll(r.Body)
+					if err != nil {
+						log.Println(err)
+						internalError(w, r)
+						return
+					}
+
+					if err := json.Unmarshal(bytes, &incoming); err != nil {
+						log.Println(err)
+						w.WriteHeader(400)
+						return
+					}
+					if err := objectDB.SaveObject(incoming.Id, string(bytes)); err != nil {
+						if err == BadId {
+							badRequest(w, r)
+							return
+						}
+						log.Println(err)
+						internalError(w, r)
+						return
+					}
+					w.WriteHeader(201)
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{ "okay" : "accepted" }`)
+				}
 				return
 			case "outbox":
 				notImplemented(w, r)
@@ -329,6 +399,7 @@ func redirectToPagesRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, pagesRoot+r.URL.Path, http.StatusSeeOther)
 }
 func main() {
+	mux := http.NewServeMux()
 	pageTemplate = template.Must(template.New("MainPage").Parse(`
     <html>
     <title>{{.Title}}</title>
@@ -466,14 +537,15 @@ func main() {
 	} else {
 		log.Fatal("Missing fediwikiroot")
 	}
-	if domain := os.Getenv("fediwikidomain"); domain == "" {
+	domain := os.Getenv("fediwikidomain")
+	if domain == "" {
 		log.Fatal("Missing fediwikidomain")
 	}
-	http.HandleFunc("/.well-known/webfinger", webFingerHandler(&db))
-	http.HandleFunc(pagesRoot, rootPage(&db, &db, &db, pagesRoot))
-	http.HandleFunc("/login/", loginHandler(&db, &db))
-	http.HandleFunc("/logout", logoutHandler(&db))
-	http.HandleFunc("/", redirectToPagesRoot)
+	mux.HandleFunc("/.well-known/webfinger", webFingerHandler(&db))
+	mux.HandleFunc(pagesRoot, rootPage(&db, &db, &db, &db, &db, pagesRoot))
+	mux.HandleFunc("/login/", loginHandler(&db, &db))
+	mux.HandleFunc("/logout", logoutHandler(&db))
+	mux.HandleFunc("/", redirectToPagesRoot)
 
 	if os.Getenv("FEDIWIKI_CGI") == "true" {
 		if err := cgi.Serve(nil); err != nil {
@@ -481,8 +553,6 @@ func main() {
 		}
 	} else {
 		log.Println("Starting server")
-		if err := http.ListenAndServe(":3333", nil); err != nil {
-			log.Fatal(err)
-		}
+		log.Fatal(http.Serve(autocert.NewListener(domain), mux))
 	}
 }

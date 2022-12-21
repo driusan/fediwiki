@@ -19,6 +19,14 @@ type OAuthClientStore interface {
 	StoreClient(hostname string, c OAuthClient) error
 }
 
+type KeyStore interface {
+	GetKey(keyid string) (crypto.PublicKey, error)
+	SaveKey(keyid, owner string, pemBytes []byte) error
+}
+type ObjectPersister interface {
+	SaveObject(id, body string) error
+}
+
 type ActorPersister interface {
 	GetPageActor(page string) (*Profile, error)
 	NewPageActor(page Page, domain string, private crypto.PrivateKey, public crypto.PublicKey) (*Profile, error)
