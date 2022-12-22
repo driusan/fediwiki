@@ -14,6 +14,8 @@ import (
 
 	"fediwiki/activitypub"
 	"fediwiki/pages"
+
+	"github.com/mischief/ndb"
 )
 
 func (db *FileSystemDB) GetPageActor(page string) (*activitypub.Actor, error) {
@@ -117,4 +119,35 @@ func (d *FileSystemDB) GetPrivateKey(pagename string) (*activitypub.Actor, crypt
 	default:
 		return nil, nil, fmt.Errorf("Unknown key type")
 	}
+}
+
+func (d *FileSystemDB) GetPageFollowers(pagename string, actors activitypub.ActorDatabase) ([]activitypub.Actor, error) {
+	pagedir := filepath.Join(d.FSRoot, pages.Root, pagename)
+	dbname := filepath.Join(pagedir, "followers.db")
+	if _, err := os.Stat(pagedir); errors.Is(err, os.ErrNotExist) {
+		return nil, NotFound
+	}
+	if _, err := os.Stat(dbname); errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+
+	followdb, err := ndb.Open(dbname)
+	if err != nil {
+		return nil, err
+	}
+	records := followdb.Search("accepted", "true")
+	var result []activitypub.Actor = nil
+	for _, record := range records {
+		for _, t := range record {
+			if t.Attr == "id" {
+				actor, err := actors.GetForeignActor(t.Val)
+				if err != nil {
+					return nil, err
+				}
+				result = append(result, *actor)
+			}
+		}
+	}
+
+	return result, nil
 }

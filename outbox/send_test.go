@@ -11,7 +11,7 @@ import (
 
 func TestRequestSigning(t *testing.T) {
 	req, err := makeRequest(activitypub.Actor{
-		Outbox: "https://example.com/foo",
+		Inbox: "https://example.com/foo",
 	}, []byte{'a', 'b'})
 	if err != nil {
 		t.Fatal(err)
