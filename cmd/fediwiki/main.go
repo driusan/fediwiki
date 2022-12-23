@@ -20,6 +20,7 @@ import (
 	"fediwiki/filesystemdb"
 	"fediwiki/httpsig"
 	"fediwiki/inbox"
+	"fediwiki/outbox"
 	"fediwiki/pages"
 	"fediwiki/session"
 
@@ -40,6 +41,19 @@ type PageTemplateData struct {
 	Content template.HTML
 }
 
+func wantJSONType(r *http.Request) string {
+	accept := strings.Split(r.Header.Get("Accept"), ",")
+	for _, val := range accept {
+		switch hval := strings.TrimSpace(val); hval {
+		case "application/activity+json",
+
+			`application/ld+json; profile="https://www.w3.org/ns/activitystreams"`,
+			"application/ld+json":
+			return hval
+		}
+	}
+	return ""
+}
 func internalError(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(500)
 	io.WriteString(w, "Internal Server error\n")
@@ -112,7 +126,7 @@ func pagehistory(session *session.Session, pagename string, historydb pages.Pers
 		return revs[i].EditTime.After(*(revs[j].EditTime))
 	})
 	for _, rev := range revs {
-		fmt.Fprintf(&b, "<li><a href=\"%s%s/history/%s\">%v</a>: edited by %v</li>\n", pages.Root, pagename, rev.RevisionID, rev.EditTime, rev.Editor)
+		fmt.Fprintf(&b, `<li><a href="%s%s/history/%s">%v</a>: edited by %v (<a href="%s%s/history/%s/diff">diff</a>)</li>`, pages.Root, pagename, rev.RevisionID, rev.EditTime, rev.Editor, pages.Root, pagename, rev.RevisionID)
 	}
 	fmt.Fprintf(&b, "</ul>")
 	pageTemplate.Execute(
@@ -168,13 +182,108 @@ func wikipagerev(session *session.Session, pagename, rev string, db pages.Persis
 		io.WriteString(w, "Invalid method")
 	}
 }
-func wikipage(session *session.Session, pagename string, adb pages.PagesDatabase, db pages.Persister, w http.ResponseWriter, r *http.Request) {
+
+func pageDiff(pagename, rev string, db pages.Persister) (string, *pages.Page, *pages.Revision, error) {
+	revs, err := db.GetPageRevisions(pagename)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	var parent *pages.Page
+	for i, rr := range revs {
+		if rr.RevisionID == rev && rr.PageName == pagename {
+			if i == 0 {
+				break
+			}
+			parrev := revs[i-1]
+			par, err := db.GetPageRevision(parrev.PageName, parrev.RevisionID)
+			if err != nil {
+				return "", nil, nil, err
+			}
+			parent = par
+
+		}
+		page, err := db.GetPageRevision(pagename, rev)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		diff, err := page.Diff(parent)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		return diff, page, &rr, nil
+	}
+	return "", nil, nil, filesystemdb.NotFound
+}
+
+func wikipagerevdiff(session *session.Session, pagename, rev string, db pages.Persister, w http.ResponseWriter, r *http.Request, iscreatenote bool) {
+	switch r.Method {
+	case "GET":
+		diff, page, thisrev, err := pageDiff(pagename, rev, db)
+		if err != nil {
+			log.Println(err)
+			notFound(w, r)
+			return
+		}
+		if ctype := wantJSONType(r); ctype != "" || iscreatenote == true {
+			if ctype != "" {
+				w.Header().Set("Content-Type", ctype)
+			} else {
+				w.Header().Set("Content-Type", `application/ld+json; profile="https://www.w3.org/ns/activitystreams"`)
+			}
+			note := thisrev.DiffNote(diff)
+			if iscreatenote {
+				create := activitypub.CreateNote{
+					BaseProperties: activitypub.BaseProperties{
+						Id:      note.Id + ".activity",
+						Context: note.Context,
+						Type:    "Create",
+						Actor:   note.AttributedTo,
+					},
+					Published: note.Published,
+					To:        note.To,
+					Cc:        note.Cc,
+					Object:    note,
+				}
+				create.Object.Context = nil
+				bytes, err := json.Marshal(create)
+				if err != nil {
+					log.Println(err)
+					internalError(w, r)
+					return
+				}
+				w.Write(bytes)
+			} else {
+				bytes, err := json.Marshal(note)
+				if err != nil {
+					log.Println(err)
+					internalError(w, r)
+					return
+				}
+				w.Write(bytes)
+			}
+		} else {
+			pageTemplate.Execute(
+				w,
+				PageTemplateData{
+					Title:   page.Title,
+					Header:  getHeader(session, pagename),
+					Content: template.HTML("<pre>" + diff + "</pre>"),
+				},
+			)
+		}
+	default:
+		w.WriteHeader(405)
+		w.Header().Add("Allow", "GET")
+		io.WriteString(w, "Invalid method")
+	}
+}
+func wikipage(session *session.Session, pagename string, pagesdb pages.PagesDatabase, db pages.Persister, actors activitypub.ActorDatabase, w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		page, err := db.GetPage(pagename)
 		if err != nil {
 			w.WriteHeader(404)
-			createPage(session, pagename, adb, db, w, r)
+			createPage(session, pagename, pagesdb, db, w, r)
 			return
 		}
 		if r.URL.Query().Get("edit") == "true" {
@@ -224,7 +333,7 @@ func wikipage(session *session.Session, pagename string, adb pages.PagesDatabase
 			Summary:  r.Form.Get("summary"),
 			Content:  r.Form.Get("content"),
 		}
-		pageactor, err := adb.GetPageActor(pagename)
+		pageactor, err := pagesdb.GetPageActor(pagename)
 		if err == filesystemdb.NotFound {
 			key, err := rsa.GenerateKey(rand.Reader, 4096)
 			if err != nil {
@@ -233,7 +342,7 @@ func wikipage(session *session.Session, pagename string, adb pages.PagesDatabase
 				io.WriteString(w, "Internal server error")
 				return
 			}
-			a2, err := adb.NewPageActor(page, r.Host, key, &key.PublicKey)
+			a2, err := pagesdb.NewPageActor(page, r.Host, key, &key.PublicKey)
 			if err != nil {
 				log.Println(err)
 				w.WriteHeader(500)
@@ -242,12 +351,54 @@ func wikipage(session *session.Session, pagename string, adb pages.PagesDatabase
 			}
 			pageactor = a2
 		}
-		if err := db.SavePage(page, *pageactor, session.Get("OAuthAuthenticatedUsername")); err != nil {
+		rev, err := db.SavePage(page, *pageactor, session.Get("OAuthAuthenticatedUsername"))
+		if err != nil {
 			log.Println(err)
 			w.WriteHeader(500)
 			io.WriteString(w, "Internal server error")
 		}
 		http.Redirect(w, r, pages.Root+page.PageName, 303)
+
+		go func() {
+			followers, err := pagesdb.GetPageFollowers(page.PageName, actors)
+			if err != nil {
+				log.Println(err)
+			}
+
+			// func pageDiff(pagename, rev string, db pages.Persister) (string, *pages.Page, *pages.Revision, error) {
+			diff, _, _, err := pageDiff(rev.PageName, rev.RevisionID, db)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+
+			note := rev.DiffNote(diff)
+			create := activitypub.CreateNote{
+				BaseProperties: activitypub.BaseProperties{
+					Id:      note.Id + ".activity",
+					Context: note.Context,
+					Type:    "Create",
+					Actor:   note.AttributedTo,
+				},
+				Published: note.Published,
+				To:        note.To,
+				Cc:        note.Cc,
+				Object:    note,
+			}
+			create.Object.Context = nil
+			bytes, err := json.Marshal(create)
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			for _, follower := range followers {
+				log.Printf("Sending update note to %v\n", follower)
+				if err := outbox.Send(pagesdb, rev.PageName, follower, activitypub.Object{Id: create.Id, Type: "Create", RawBytes: bytes}); err != nil {
+					log.Println(err)
+				}
+			}
+		}()
+
 	default:
 		w.WriteHeader(405)
 		// Should be PUT, but html is stupid and doesn't let us send a PUT request from a form
@@ -268,14 +419,14 @@ func rootPage(pagesdb pages.PagesDatabase, pagedb pages.Persister, sessionDB ses
 		urlPieces := strings.Split(strings.TrimPrefix(r.URL.Path, prefix), "/")
 		switch len(urlPieces) {
 		case 0:
-			wikipage(sess, frontPage, pagesdb, pagedb, w, r)
+			wikipage(sess, frontPage, pagesdb, pagedb, actorDb, w, r)
 			return
 		case 1:
 			if urlPieces[0] == "" {
-				wikipage(sess, frontPage, pagesdb, pagedb, w, r)
+				wikipage(sess, frontPage, pagesdb, pagedb, actorDb, w, r)
 				return
 			}
-			wikipage(sess, urlPieces[0], pagesdb, pagedb, w, r)
+			wikipage(sess, urlPieces[0], pagesdb, pagedb, actorDb, w, r)
 			return
 		case 2:
 			switch urlPieces[1] {
@@ -392,6 +543,18 @@ func rootPage(pagesdb pages.PagesDatabase, pagedb pages.Persister, sessionDB ses
 				return
 			}
 			wikipagerev(sess, urlPieces[0], urlPieces[2], pagedb, w, r)
+		case 4:
+			page := urlPieces[0]
+			if urlPieces[1] != "history" {
+				notFound(w, r)
+				return
+			}
+			rev := urlPieces[2]
+			if urlPieces[3] != "diff" && urlPieces[3] != "diff.activity" {
+				notFound(w, r)
+				return
+			}
+			wikipagerevdiff(sess, page, rev, pagedb, w, r, urlPieces[3] == "diff.activity")
 		default:
 			notFound(w, r)
 		}

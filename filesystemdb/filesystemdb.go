@@ -105,62 +105,71 @@ func (db *FileSystemDB) GetPageRevision(pagename, revision string) (*pages.Page,
 
 	return &p, nil
 }
-func (db *FileSystemDB) SavePage(p pages.Page, prof activitypub.Actor, editor string) error {
+func (db *FileSystemDB) GetPageRevisionParent(pagename, revision string) (*pages.Page, error) {
+	return nil, fmt.Errorf("Not implemented")
+}
+func (db *FileSystemDB) SavePage(p pages.Page, prof activitypub.Actor, editor string) (*pages.Revision, error) {
 	if p.PageName == "" {
-		return fmt.Errorf("No page name")
+		return nil, fmt.Errorf("No page name")
 	}
 	basedir := filepath.Join(db.FSRoot, "pages", p.PageName)
 
 	var idrand [36]byte
 	if _, err := rand.Read(idrand[:]); err != nil {
-		return err
+		return nil, err
 	}
 	savedir := filepath.Join(basedir, "history", base64.URLEncoding.EncodeToString(idrand[:]))
 
 	if err := os.MkdirAll(savedir, 0777); err != nil {
-		return err
+		return nil, err
 	}
 	content := string(p.Content)
 	content = strings.Replace(content, "\r\n", "\n", -1)
 	content = strings.Replace(content, "\n\r", "\n", -1)
 	content = strings.Replace(content, "\r", "\n", -1)
 	if err := os.WriteFile(savedir+"/content.md", []byte(content), 0664); err != nil {
-		return err
+		return nil, err
 	}
 	content = string(p.Summary)
 	content = strings.Replace(content, "\r\n", "\n", -1)
 	content = strings.Replace(content, "\n\r", "\n", -1)
 	content = strings.Replace(content, "\r", "\n", -1)
 	if err := os.WriteFile(savedir+"/summary.md", []byte(content), 0664); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.WriteFile(savedir+"/title.txt", []byte(p.Title), 0664); err != nil {
-		return err
+		return nil, err
 	}
 	var parentstring string
 	if bytes, err := os.ReadFile(filepath.Join(basedir, "latest")); err == nil {
 		parentstring = string(bytes)
 		if err := os.WriteFile(filepath.Join(savedir, "parentversion"), bytes, 0664); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	f, err := os.OpenFile(filepath.Join(basedir, "revisions.db"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer f.Close()
 
+	savetime := time.Now()
 	if parentstring != "" {
-		fmt.Fprintf(f, "id=%s time=%s editor=%s parent=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), time.Now().Format(time.RFC3339), editor, parentstring, p.PageName)
+		fmt.Fprintf(f, "id=%s time=%s editor=%s parent=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), savetime.Format(time.RFC3339), editor, parentstring, p.PageName)
 	} else {
-		fmt.Fprintf(f, "id=%s time=%s editor=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), time.Now().Format(time.RFC3339), editor, p.PageName)
+		fmt.Fprintf(f, "id=%s time=%s editor=%s pagename=%s\n", base64.URLEncoding.EncodeToString(idrand[:]), savetime.Format(time.RFC3339), editor, p.PageName)
 	}
 
 	if err := os.WriteFile(basedir+"/latest", []byte(base64.URLEncoding.EncodeToString(idrand[:])), 0664); err != nil {
-		return err
+		return nil, err
 	}
-	return nil
+	return &pages.Revision{
+		PageName:   p.PageName,
+		RevisionID: base64.URLEncoding.EncodeToString(idrand[:]),
+		Editor:     editor,
+		EditTime:   &savetime,
+	}, nil
 }
 
 func (db *FileSystemDB) GetClient(hostname string) (oauth.Client, error) {

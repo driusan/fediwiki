@@ -106,7 +106,7 @@ func TestGetFollowers(t *testing.T) {
 	}
 
 	testActors := testActorDB{
-		"Bar": activitypub.Actor{},
+		"Bar": activitypub.Actor{Id: "Bar"},
 	}
 
 	followers, err = db.GetPageFollowers("Foo", testActors)
@@ -115,5 +115,27 @@ func TestGetFollowers(t *testing.T) {
 	}
 	if len(followers) != 1 {
 		t.Errorf("Expected 1 follower, got %v", len(followers))
+	}
+	if followers[0].Id != "Bar" {
+		t.Errorf("Wrong follower, want Bar; got %v", followers[0].Id)
+	}
+
+	undo := activitypub.Undo{
+		BaseProperties: activitypub.BaseProperties{
+			Id:    "abc2",
+			Type:  "Undo",
+			Actor: "Bar",
+		},
+		Object: followReq,
+	}
+	if err := db.UndoFollow("Foo", undo); err != nil {
+		t.Error(err)
+	}
+	followers, err = db.GetPageFollowers("Foo", testActors)
+	if err != nil {
+		t.Error(err)
+	}
+	if len(followers) != 0 {
+		t.Errorf("Expected 0 followers after undo, got %v", len(followers))
 	}
 }

@@ -127,7 +127,6 @@ func (d *FileSystemDB) AddFollower(pagename string, request activitypub.Follow) 
 	}
 	return nil
 }
-
 func (d *FileSystemDB) UndoFollow(pagename string, undo activitypub.Undo) error {
 	filename := filepath.Join(d.FSRoot, "undo.db")
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)

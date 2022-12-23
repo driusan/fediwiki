@@ -135,19 +135,43 @@ func (d *FileSystemDB) GetPageFollowers(pagename string, actors activitypub.Acto
 	if err != nil {
 		return nil, err
 	}
+
 	records := followdb.Search("accepted", "true")
 	var result []activitypub.Actor = nil
 	for _, record := range records {
+		var actor activitypub.Actor
+		var acceptId string
 		for _, t := range record {
-			if t.Attr == "id" {
-				actor, err := actors.GetForeignActor(t.Val)
+			switch t.Attr {
+			case "id":
+				a2, err := actors.GetForeignActor(t.Val)
 				if err != nil {
 					return nil, err
 				}
-				result = append(result, *actor)
+				actor = *a2
+			case "acceptedFrom":
+				acceptId = t.Val
 			}
+		}
+		if d.isUndone(acceptId) == false {
+			result = append(result, actor)
 		}
 	}
 
 	return result, nil
+}
+
+func (d *FileSystemDB) isUndone(id string) bool {
+	filename := filepath.Join(d.FSRoot, "undo.db")
+	if _, err := os.Stat(filename); errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+
+	undodb, err := ndb.Open(filename)
+	if err != nil {
+		panic(err)
+	}
+	records := undodb.Search("id", id)
+	return len(records) > 0
+
 }

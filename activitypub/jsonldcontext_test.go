@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 )
 
-func isEqual(a, b JSONLDContext) bool {
+func isJSONLDContextEqual(a, b JSONLDContext) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -57,7 +57,7 @@ func TestJSONLDContextUnmarshalJSON(t *testing.T) {
 			t.Error(err)
 			continue
 		}
-		if isEqual(result, tc.Want) != true {
+		if isJSONLDContextEqual(result, tc.Want) != true {
 			t.Errorf("Unexpected result. Want %v got %v", tc.Want, result)
 		}
 	}
