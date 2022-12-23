@@ -139,6 +139,59 @@ func pagehistory(session *session.Session, pagename string, historydb pages.Pers
 	)
 }
 
+func renderTalkThread(note activitypub.Note, allPageNotes []activitypub.Note, actors activitypub.ActorDatabase) string {
+	var content strings.Builder
+	var replies []activitypub.Note
+
+	for _, n := range allPageNotes {
+		if n.InReplyTo != nil && *n.InReplyTo == note.Id {
+			replies = append(replies, n)
+		}
+	}
+
+	var actordisplay string
+	act, err := actors.GetForeignActor(note.AttributedTo)
+	if err != nil {
+		actordisplay = note.AttributedTo
+	} else {
+		actordisplay = act.MentionName()
+	}
+
+	fmt.Fprintf(&content, "<div><div>%v</div><div>- by <a href=\"%s\">%s</a> @ %v</div>", note.Content, note.AttributedTo, actordisplay, note.Published)
+	if len(replies) > 0 {
+		fmt.Fprintf(&content, "<div style=\"padding: 5px; margin-left: 35px;\">")
+		for _, n := range replies {
+			reply := renderTalkThread(n, allPageNotes, actors)
+			fmt.Fprintf(&content, "%v", reply)
+		}
+		fmt.Fprintf(&content, "</div>")
+	}
+	fmt.Fprintf(&content, "</div>")
+	return content.String()
+}
+func talkpage(session *session.Session, pagename string, pagedb pages.Persister, actors activitypub.ActorDatabase, w http.ResponseWriter, r *http.Request) {
+	notes, err := pagedb.GetPageNotes(pagename)
+	if err != nil {
+		notFound(w, r)
+		return
+	}
+	var content strings.Builder
+	for _, note := range notes {
+		if note.InReplyTo == nil {
+			fmt.Fprintf(&content, "%v", renderTalkThread(note, notes, actors))
+		}
+	}
+	pageTemplate.Execute(
+		w,
+		PageTemplateData{
+			Title:   pagename + " Meta Discussion",
+			Header:  getHeader(session, pagename),
+			Content: template.HTML(content.String()),
+		},
+	)
+
+}
+
 func renderPage(page pages.Page) template.HTML {
 	contentparser := parser.NewWithExtensions(parser.CommonExtensions)
 	summaryrenderer := html.NewRenderer(html.RendererOptions{Flags: html.CommonFlags | html.SkipHTML})
@@ -532,7 +585,7 @@ func rootPage(pagesdb pages.PagesDatabase, pagedb pages.Persister, sessionDB ses
 				pagehistory(sess, urlPieces[0], pagedb, w, r)
 				return
 			case "talk":
-				notImplemented(w, r)
+				talkpage(sess, urlPieces[0], pagedb, actorDb, w, r)
 				return
 			default:
 				notFound(w, r)
@@ -685,13 +738,13 @@ func main() {
             <nav>
                 <ul>
                     <li><a href="` + pages.Root + `">Home</a></li>
-                    <li><a href="` + pages.Root + `{{.PageName}}/history">Page history</a></li>
+                    <li><a href="` + pages.Root + `{{.PageName}}">{{.PageName}}</a> (<a href="` + pages.Root + `{{.PageName}}/history">History</a> <a href="` + pages.Root + `{{.PageName}}/talk">Discussion</a>)</li>
                 </ul>
             </nav>
             <div>Logged in as {{.Username}}</div>
             <nav class="actions">
                 <ul>
-                    <li><a href="?edit=true">Edit Page</li>
+                    <li><a href="` + pages.Root + `{{.PageName}}?edit=true">Edit {{.PageName}}</li>
                     <li><a href="/logout">Logout</a></li>
                 </ul>
             </nav>

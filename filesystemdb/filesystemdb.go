@@ -303,6 +303,65 @@ func (db *FileSystemDB) GetPageRevisions(pagename string) ([]pages.Revision, err
 	}
 	return result, nil
 }
+func (d *FileSystemDB) HasObject(id string) bool {
+	odb, err := ndb.Open(filepath.Join(d.FSRoot, "objects", "objects.db"))
+	if err != nil {
+		return false
+	}
+	records := odb.Search("id", id)
+	return len(records) > 0
+}
+
+func (d *FileSystemDB) UpdateObject(obj activitypub.Object) error {
+	if !d.HasObject(obj.Id) {
+		return d.SaveObject(obj)
+	}
+	odb, err := ndb.Open(filepath.Join(d.FSRoot, "objects", "objects.db"))
+	if err != nil {
+		return err
+	}
+	records := odb.Search("id", obj.Id)
+	if len(records) != 1 {
+		return fmt.Errorf("Could not update object")
+	}
+	for _, tuple := range records[0] {
+		if tuple.Attr == "cachepath" {
+			if err := os.WriteFile(filepath.Join(d.FSRoot, "objects", tuple.Val), obj.RawBytes, 0644); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("Could not find object cachepath")
+}
+
+func (d *FileSystemDB) GetObject(id string) (*activitypub.Object, error) {
+	odb, err := ndb.Open(filepath.Join(d.FSRoot, "objects", "objects.db"))
+	if err != nil {
+		return nil, err
+	}
+	record := odb.Search("id", id)
+	if len(record) != 1 {
+		return nil, fmt.Errorf("Wrong number of records. Want 1 got %v", len(record))
+	}
+	var rv activitypub.Object
+	for _, tuple := range record[0] {
+		switch tuple.Attr {
+		case "id":
+			rv.Id = tuple.Val
+		case "type":
+			rv.Type = tuple.Val
+		case "cachepath":
+			bytes, err := os.ReadFile(filepath.Join(d.FSRoot, "objects", tuple.Val))
+			if err != nil {
+				return nil, err
+			}
+			rv.RawBytes = bytes
+		}
+	}
+	return &rv, nil
+
+}
 func (d *FileSystemDB) SaveObject(obj activitypub.Object) error {
 	if !strings.HasPrefix(obj.Id, "https://") {
 		return BadId

@@ -3,6 +3,7 @@ package pages
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"fediwiki/activitypub"
@@ -30,6 +31,7 @@ type Persister interface {
 	GetPageRevisions(pagename string) ([]Revision, error)
 	GetPageRevision(pagename, revisionid string) (*Page, error)
 	GetPageRevisionParent(pagename, revisionid string) (*Page, error)
+	GetPageNotes(pagename string) ([]activitypub.Note, error)
 }
 
 func (r Revision) DiffNote(diff string) activitypub.Note {
@@ -51,4 +53,15 @@ func (r Revision) DiffNote(diff string) activitypub.Note {
 		Cc:           []string{fmt.Sprintf("https://%s%s%s/followers", os.Getenv("fediwikidomain"), Root, r.PageName)},
 	}
 	return note
+}
+
+func GetPageNameFromActorId(url string) (string, error) {
+	re := regexp.MustCompile("https://" + os.Getenv("fediwikidomain") + "/pages/(.+)/actor")
+	matches := re.FindStringSubmatch(url)
+	if matches == nil {
+		return "", fmt.Errorf("Unknown page %s", url)
+
+	}
+	return matches[1], nil
+
 }

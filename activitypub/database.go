@@ -9,6 +9,8 @@ type ActivityDatabase interface {
 
 	AddFollower(pagename string, request Follow) error
 	UndoFollow(pagename string, request Undo) error
+
+	AddPageNote(pagename string, request Note) error
 }
 
 type ActorDatabase interface {

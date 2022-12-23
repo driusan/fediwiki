@@ -7,23 +7,12 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"regexp"
 
 	"fediwiki/activitypub"
 	"fediwiki/outbox"
 	"fediwiki/pages"
 )
 
-func getPagenameFromActorURL(url string) (string, error) {
-	re := regexp.MustCompile("https://" + os.Getenv("fediwikidomain") + "/pages/(.+)/actor")
-	matches := re.FindStringSubmatch(url)
-	if matches == nil {
-		return "", fmt.Errorf("Unknown page %s", url)
-
-	}
-	return matches[1], nil
-
-}
 func newAcceptId(pageowner string) string {
 	var idrand [36]byte
 	if _, err := rand.Read(idrand[:]); err != nil {
@@ -33,7 +22,7 @@ func newAcceptId(pageowner string) string {
 	return fmt.Sprintf("https://%s/pages/%s/#accept-%s", os.Getenv("fediwikidomain"), pageowner, base64.URLEncoding.EncodeToString(idrand[:]))
 }
 func HandleFollow(pagesdb pages.PagesDatabase, actordb activitypub.ActorDatabase, db activitypub.ActivityDatabase, request activitypub.Follow) error {
-	pagename, err := getPagenameFromActorURL(request.Object)
+	pagename, err := pages.GetPageNameFromActorId(request.Object)
 	if err != nil {
 		return err
 	}
@@ -73,12 +62,36 @@ func HandleFollow(pagesdb pages.PagesDatabase, actordb activitypub.ActorDatabase
 }
 
 func HandleUndo(db activitypub.ActivityDatabase, request activitypub.Undo) error {
-	pagename, err := getPagenameFromActorURL(request.Object.Object)
+	pagename, err := pages.GetPageNameFromActorId(request.Object.Object)
 	if err != nil {
 		return err
 	}
 	if err := db.UndoFollow(pagename, request); err != nil {
 		return err
+	}
+	return nil
+}
+
+func HandleCreateNote(db activitypub.ActivityDatabase, incoming activitypub.CreateNote) error {
+	if incoming.Type != "Create" || incoming.Object.Type != "Note" {
+		return fmt.Errorf("Bad create note")
+	}
+
+	for _, to := range incoming.Object.To {
+		pname, err := pages.GetPageNameFromActorId(to)
+		if err == nil {
+			if err := db.AddPageNote(pname, incoming.Object); err != nil {
+				return err
+			}
+		}
+	}
+	for _, to := range incoming.Object.Cc {
+		pname, err := pages.GetPageNameFromActorId(to)
+		if err == nil {
+			if err := db.AddPageNote(pname, incoming.Object); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -104,6 +117,17 @@ func Process(objectDB activitypub.ObjectDatabase, pagesdb pages.PagesDatabase, a
 			return err
 		}
 		if err := HandleUndo(activityDb, u); err != nil {
+			return err
+		}
+	case "Create":
+		var c activitypub.CreateNote
+		if err := json.Unmarshal(incoming.RawBytes, &c); err != nil {
+			return err
+		}
+		if c.Object.Type != "Note" {
+			return fmt.Errorf("Unhandled create type %v", c.Object.Type)
+		}
+		if err := HandleCreateNote(activityDb, c); err != nil {
 			return err
 		}
 	default:

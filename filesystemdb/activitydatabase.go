@@ -9,6 +9,7 @@ import (
 
 	"path/filepath"
 
+	"encoding/json"
 	"fediwiki/activitypub"
 	"fediwiki/pages"
 
@@ -127,6 +128,7 @@ func (d *FileSystemDB) AddFollower(pagename string, request activitypub.Follow) 
 	}
 	return nil
 }
+
 func (d *FileSystemDB) UndoFollow(pagename string, undo activitypub.Undo) error {
 	filename := filepath.Join(d.FSRoot, "undo.db")
 	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
@@ -140,4 +142,63 @@ func (d *FileSystemDB) UndoFollow(pagename string, undo activitypub.Undo) error 
 		return err
 	}
 	return nil
+}
+
+func (d *FileSystemDB) AddPageNote(pagename string, note activitypub.Note) error {
+	filename := filepath.Join(d.FSRoot, "notes.db")
+	notedb, err := ndb.Open(filename)
+	if err == nil {
+		records := notedb.Search("id", note.Id)
+		for _, r := range records {
+			for _, tuple := range r {
+				if tuple.Attr == "pagename" && tuple.Val == pagename {
+					return fmt.Errorf("Already added to database")
+				}
+			}
+		}
+	}
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0664)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	record := fmt.Sprintf("\nid=%s type=Note pagename=%s\n", note.Id, pagename)
+	if _, err := f.WriteString(record); err != nil {
+		return err
+	}
+	bytes, err := json.Marshal(note)
+	return d.UpdateObject(activitypub.Object{
+		Id:       note.Id,
+		Type:     "Note",
+		RawBytes: bytes,
+	})
+	return nil
+}
+
+func (d *FileSystemDB) GetPageNotes(pagename string) ([]activitypub.Note, error) {
+	filename := filepath.Join(d.FSRoot, "notes.db")
+	notedb, err := ndb.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var rv []activitypub.Note
+	records := notedb.Search("pagename", pagename)
+	for _, r := range records {
+		for _, tuple := range r {
+			if tuple.Attr == "id" {
+				raw, err := d.GetObject(tuple.Val)
+				if err != nil {
+					return nil, err
+				}
+				var createnote activitypub.Note
+				if err := json.Unmarshal(raw.RawBytes, &createnote); err != nil {
+					return nil, err
+				}
+				rv = append(rv, createnote)
+			}
+		}
+	}
+	return rv, nil
 }
