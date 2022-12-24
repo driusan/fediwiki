@@ -241,9 +241,16 @@ func pageDiff(pagename, rev string, db pages.Persister) (string, *pages.Page, *p
 	if err != nil {
 		return "", nil, nil, err
 	}
+
+	page, err := db.GetPageRevision(pagename, rev)
+	if err != nil {
+		return "", nil, nil, err
+	}
 	var parent *pages.Page
+	var thisrev *pages.Revision
 	for i, rr := range revs {
 		if rr.RevisionID == rev && rr.PageName == pagename {
+			thisrev = &rr
 			if i == 0 {
 				break
 			}
@@ -253,19 +260,15 @@ func pageDiff(pagename, rev string, db pages.Persister) (string, *pages.Page, *p
 				return "", nil, nil, err
 			}
 			parent = par
-
+			break
 		}
-		page, err := db.GetPageRevision(pagename, rev)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		diff, err := page.Diff(parent)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		return diff, page, &rr, nil
 	}
-	return "", nil, nil, filesystemdb.NotFound
+
+	diff, err := page.Diff(parent)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return diff, page, thisrev, nil
 }
 
 func wikipagerevdiff(session *session.Session, pagename, rev string, db pages.Persister, w http.ResponseWriter, r *http.Request, iscreatenote bool) {
